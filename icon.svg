@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="DuMate">
+  <title>DuMate (百度搭子)</title>
+  <defs>
+    <linearGradient id="tile" x1="0.78" y1="0.12" x2="0.22" y2="0.92">
+      <stop offset="0" stop-color="#F2F2FE"/>
+      <stop offset="0.34" stop-color="#C9CCF9"/>
+      <stop offset="0.68" stop-color="#8E90F6"/>
+      <stop offset="1" stop-color="#5250EC"/>
+    </linearGradient>
+  </defs>
+  <rect x="118" y="124" width="276" height="276" rx="92" ry="92" fill="url(#tile)"/>
+  <g fill="#0B0B0F">
+    <ellipse cx="305" cy="232" rx="17" ry="31" transform="rotate(6 305 232)"/>
+    <ellipse cx="360" cy="228" rx="17" ry="31" transform="rotate(6 360 228)"/>
+    <path d="M176 226
+             C 186 268, 214 292, 250 296
+             C 283 299, 306 288, 316 272
+             C 320 265, 314 258, 307 261
+             C 291 269, 272 273, 250 271
+             C 224 268, 205 252, 200 226
+             C 198 216, 173 216, 176 226 Z"/>
+  </g>
+</svg>

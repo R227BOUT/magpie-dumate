@@ -1,0 +1,33 @@
+{
+  "name": "magpie-plugin-dumate",
+  "version": "0.2.1",
+  "description": "Baidu DuMate (百度搭子) personal points as a Magpie provider: OpenAI-compatible models, daily check-in, balance display",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "icon.png",
+    "icon.svg",
+    "run-tests.mjs",
+    "test-*.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node run-tests.mjs",
+    "test:quick": "node run-tests.mjs --quick"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "magpie-plugin",
+    "dumate",
+    "baidu",
+    "qianfan"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "maxConcurrency": 4
+  }
+}

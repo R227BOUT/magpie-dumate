@@ -1,0 +1,33 @@
+# 依赖与本地状态
+node_modules/
+bun.lock
+bun.lockb
+package-lock.json
+
+# 测试运行的产物（含真实积分流水，绝不外传）
+stability-logs/
+perf-baseline.json
+*.jsonl
+*.log
+
+# 本地诊断脚本
+_icon-probe.mjs
+_*.mjs
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 凭据（万一有人放进来了）
+auth.json
+.cookie-key
+plugin-auth.json
+*.pem
+*.key
+
+# 打包产物
+*.tgz
+*.zip
