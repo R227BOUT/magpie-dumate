@@ -11,7 +11,8 @@
     "icon.svg",
     "run-tests.mjs",
     "test-*.mjs",
-    "README.md"
+    "README.md",
+    "tools/*"
   ],
   "scripts": {
     "test": "node run-tests.mjs",
