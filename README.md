@@ -17,7 +17,22 @@ OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan �
   2. 浏览器登录（无需安装 DuMate：打开 login.bce.baidu.com 登录后，从 DevTools → Network
      复制请求头的 `Cookie` 整行——关键 Cookie 是 httpOnly，`document.cookie` 拿不到）
   3. 手动粘贴 Cookie 字符串
-- **图标**：`auth.icon` 提供 `data:image` URI，按此顺序取第一个可用的：
+- **图标**：magpie 有**两条互不相通的取图路径**，两处都要给，少一处就有地方是空框：
+
+  | 显示位置 | 取图来源 | 本插件的声明处 |
+  |---|---|---|
+  | 已安装列表、provider 行、登录对话框 | 运行时 `auth.icon`（插件代码算出来的） | `index.mjs` 的 `auth.icon` |
+  | **插件 → 发现 → GitHub 商店卡片** | **只读 `package.json` 的 `magpie.icon`** | `package.json` 的 `magpie.icon` |
+
+  商店卡片那条是最容易漏的：magpie 扫 GitHub 时只 `fetch` 仓库根目录的 `package.json`
+  （`internal/plugin/github.go`：`t.Icon = ownIcon(pj.Magpie.Icon)`），
+  **根本不看插件目录里的 `icon.png` / `icon.svg`**。字段缺失时 `ownIcon()` 返回空串，
+  前端 `logo()` 拿到空值就画一个空心线框占位——看起来像"图没上传成功"，其实是一个字都没写。
+
+  `magpie.icon` 的格式约束（`internal/plugin/market.go` 的 `ownIcon()`）：
+  必须是 `https://` 或 `data:image/` 开头的字符串，长度上限 `3<<19`（1.5 MB），否则一律丢弃。
+
+  运行时 `auth.icon` 按此顺序取第一个可用的：
   1. 插件目录内自带的 `icon.png`（**推荐**，插件自包含，换机器也能用）
   2. 本机已安装 DuMate 的官方图标（256 → 128 → 512，只读借用，不复制）
   3. 插件目录内自带的 `icon.svg`（矢量兜底）
@@ -25,10 +40,13 @@ OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan �
 
   任何一级读取失败都只会降级，不会影响 provider 加载。
 
-  **当前实际使用**：`icon.png` 取自客户端 `icons/256x256.png`（31.8KB），已随插件自带。
+  **当前实际使用**：`icon.png` 取自客户端 `icons/256x256.png`（31.8KB），已随插件自带；
+  `package.json` 的 `magpie.icon` 内嵌的是同一张图（base64 后 43,466 字符）。
+  **换图标时两处都要改**：改了 `icon.png` 之后要重新生成 `magpie.icon` 再提交，
+  否则商店卡片会一直是旧图。
   **选哪一张**：用 `256x256.png`，不要 `512x512.png`（101.5KB）或 `1024x1024.png`（244.6KB）——
   magpie 只在插件卡片和 Installed 行渲染，实际尺寸 20–40px，256 与 512 缩到这个尺寸无可辨差异，
-  但 base64 编码后体积只有三分之一（插件加载时每次都要编码）。
+  但 base64 编码后体积只有三分之一（插件加载时每次都要编码，`package.json` 也要重写一遍）。
   不要把 `trayTemplate.png` 拿来用，那是 macOS 菜单栏的纯黑剪影，深色主题下会整个消失。
 
 ## 安装

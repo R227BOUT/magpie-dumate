@@ -63,4 +63,24 @@ try {
   ok(`package.json: name=${pkg.name}, main=${pkg.main ?? "(默认 index)"}`)
 } catch (e) { fail("package.json", e) }
 
+console.log("[S8] 商店图标准备度（发现页只读 package.json 的 magpie.icon）")
+// magpie 扫 GitHub 时只 fetch 仓库根目录的 package.json，
+// 用 ownIcon() 判一个图：https:// 或 data:image/ 开头，且不超过 3<<19。
+// 少了这个字段，发现页卡片就画空心框——插件目录里的 icon.png 帮不上忙。
+try {
+  const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"))
+  const said = pkg.magpie?.icon ?? ""
+  if (!said) throw new Error("magpie.icon 缺失 —— 发现页会是空心框")
+  if (said.length > 3 << 19) throw new Error(`magpie.icon 超长 ${said.length} > ${3 << 19}`)
+  if (!/^(https:\/\/|data:image\/)/i.test(said)) throw new Error("magpie.icon 不是 https:// 或 data:image/")
+  // 与随包的 icon.png 必须是同一张，否则改了图忘了重生成
+  const head = said.slice(0, said.indexOf(","))
+  const mime = head.match(/^data:(image\/[a-z+]+);base64$/i)
+  if (!mime) throw new Error("magpie.icon 不是 base64 data URI: " + head.slice(0, 40))
+  const embedded = Buffer.from(said.slice(said.indexOf(",") + 1), "base64")
+  const onDisk = readFileSync(new URL("./icon.png", import.meta.url))
+  if (!embedded.equals(onDisk)) throw new Error(`magpie.icon 与 icon.png 不一致（${embedded.length} vs ${onDisk.length} bytes）`)
+  ok(`magpie.icon ${said.length} 字符 = icon.png 原图（${onDisk.length} bytes）`)
+} catch (e) { fail("商店图标", e) }
+
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")
