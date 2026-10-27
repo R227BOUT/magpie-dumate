@@ -36,4 +36,21 @@ for (const suite of suites) {
 }
 console.log("─".repeat(52))
 console.log(`合计: ${totalPass} pass, ${totalFail} fail, ${suites.length} 套件${failedSuites.length ? " · 失败: " + failedSuites.join(", ") : ""}`)
+
+// 发布前的脱敏闸门：拿本机真实登录态（昵称、accountId、cookie）比对全部受控文件。
+// 单独跑，不占 pass 计数，但不干净就让整轮失败。
+const sec = spawnSync(node, [join(here, "tools/check-secrets.mjs"), "--all"], {
+  encoding: "utf8", timeout: 60_000,
+})
+const secOut = ((sec.stdout ?? "") + (sec.stderr ?? "")).trim()
+if (sec.status === 0) {
+  console.log("✓ secrets  脱敏检查通过")
+} else {
+  totalFail++
+  console.log("✗ secrets  脱敏检查不通过")
+  for (const line of secOut.split("\n")) {
+    if (line.includes("✗") || line.includes("发现")) console.log("    " + line.trim())
+  }
+}
+
 process.exitCode = totalFail ? 1 : 0
