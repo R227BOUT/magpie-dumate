@@ -64,7 +64,7 @@ try {
   const readme = readFileSync(join(here, "README.md"), "utf8")
   const addCmd = readme.match(/magpie plugin add (\S+)/)?.[1]
   if (!addCmd) throw new Error("README 无 plugin add 命令")
-  // 相对路径 ./magpie-plugin-dumate 在本项目位置也成立；绝对路径检查存在性
+  // 相对路径 ./magpie-dumate 在本项目位置也成立；绝对路径检查存在性
   if (addCmd.includes("D:") || addCmd.includes("C:")) {
     const p = addCmd.replace(/\//g, "\\")
     try { readFileSync(join(p, "index.mjs")) } catch { throw new Error("README 里的绝对路径不存在: " + addCmd) }

@@ -1,4 +1,4 @@
-# magpie-plugin-dumate
+# magpie-dumate
 
 OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan 桌面版）** personal points.
 
@@ -74,7 +74,7 @@ $d = "<magpie 目录>"
 PATH 配好后就可以简写：
 
 ```bash
-magpie plugin add ./magpie-plugin-dumate
+magpie plugin add ./magpie-dumate
 magpie plugin login dumate
 ```
 
@@ -103,7 +103,7 @@ nothing is installed"），所以以后改 `index.mjs` 只要重载就生效，�
 这是最容易误解的地方。`plugins.json` 的结构是 `{"plugins": [{"spec", "off"?, "options"?}]}`，
 **每条 spec 只指向一个插件模块入口**，Magpie **不会扫描父目录去发现子插件**。
 即使所有插件都放在 `magpie/` 下，`plugin add ./magpie` 也只会尝试加载 `magpie/` 自身的入口文件，
-不会把 `magpie/magpie-plugin-dumate`、`magpie/magpie-plugin-xxx` 自动注册进来。
+不会把 `magpie/magpie-dumate`、`magpie/magpie-plugin-xxx` 自动注册进来。
 
 所以：
 
@@ -112,7 +112,7 @@ nothing is installed"），所以以后改 `index.mjs` 只要重载就生效，�
 - 一个 spec 内部可以导出多个 provider/hook（那是同一个包的事），但那不减少 spec 条数。
 
 运行时可以把 `plugin-providers.json` 当作验证依据：它是 magpie 生成的缓存，
-每个条目形如 `{"id":"dumate","spec":"D:\\...\\magpie-plugin-dumate"}` —— **id 与 spec 一一对应**。
+每个条目形如 `{"id":"dumate","spec":"D:\\...\\magpie-dumate"}` —— **id 与 spec 一一对应**。
 
 > ⚠️ 不要手工把插件文件夹塞进 `.config/magpie/plugins/node_modules/`。那个目录由 Magpie 用
 > `bun install` 按 `plugins/package.json` 的依赖清单维护（npm / git 装的包才落地在这里），

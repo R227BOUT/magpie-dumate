@@ -43,7 +43,7 @@ git config --global user.email "你的邮箱"
 
 1. 登录 <https://github.com>
 2. 右上角 `+` → **New repository**
-3. Repository name 填 `magpie-plugin-dumate`
+3. Repository name 填 `magpie-dumate`
 4. 选 **Public**（必须公开，magpie 要能读到）
 5. 🔴 **下面三个勾选框全部不要勾**（Add a README / Add .gitignore / Choose a license）——
    这些文件本地已经有了，勾了会在推送时冲突
@@ -61,7 +61,7 @@ git add -A
 git status --short
 ```
 
-> `<本插件目录>` 换成你实际放插件的目录，例如 `cd D:\code\magpie-plugin-dumate`。
+> `<本插件目录>` 换成你实际放插件的目录，例如 `cd D:\code\magpie-dumate`。
 > 在资源管理器里打开该文件夹、地址栏输入 `powershell` 回车，也能直接开在当前目录。
 
 🔴 **在这里停下，先看 `git status --short` 的输出。** 正常应该是 45 行左右，每行以 `A  ` 开头。
@@ -79,7 +79,7 @@ git status --short
 ```powershell
 git commit -m "Initial commit: magpie plugin for Baidu DuMate"
 git branch -M main
-git remote add origin https://github.com/你的GitHub用户名/magpie-plugin-dumate.git
+git remote add origin https://github.com/你的GitHub用户名/magpie-dumate.git
 git push -u origin main
 ```
 
@@ -94,7 +94,7 @@ git push -u origin main
 
 #### 第 3 步：打 topic（这一步决定 magpie 能不能发现你）
 
-1. 浏览器打开 `https://github.com/你的用户名/magpie-plugin-dumate`
+1. 浏览器打开 `https://github.com/你的用户名/magpie-dumate`
 2. 页面右侧 **About** 区域，点旁边的**齿轮图标 ⚙**
 3. **Topics** 输入框里输入 `magpie-plugin`，按回车
 4. 点 **Save changes**
@@ -108,7 +108,7 @@ git push -u origin main
 - 命令行装一次验证（用一个临时目录试，别动现在装好的那份）：
 
 ```powershell
-magpie plugin add github:你的用户名/magpie-plugin-dumate
+magpie plugin add github:你的用户名/magpie-dumate
 ```
 
 #### 出问题怎么反馈
@@ -128,7 +128,7 @@ git status          # ← 关键：确认没有 stability-logs / perf-baseline.j
 git commit -m "Initial commit: magpie plugin for Baidu DuMate"
 
 # 在 GitHub 建好空仓库后
-git remote add origin https://github.com/<你的账号>/magpie-plugin-dumate.git
+git remote add origin https://github.com/<你的账号>/magpie-dumate.git
 git branch -M main
 git push -u origin main
 ```
@@ -138,7 +138,7 @@ git push -u origin main
 几分钟后 magpie 里应该能看到。也可以直接在终端验证装得上：
 
 ```bash
-magpie plugin add github:<你的账号>/magpie-plugin-dumate
+magpie plugin add github:<你的账号>/magpie-dumate
 ```
 
 ### 更新机制
@@ -176,7 +176,7 @@ git 仓库没有版本号可比。magpie 判断「有更新」的方式是：**�
 - **代码从此住在别人仓库**。你不再能单独 `git push` 发布；改动要走 PR。
 - **版本号一 bump 就自动发布**：`main` 上改版本 → CI 打进 `dist` 分支 + 发 npm，
   **所有装了它的 magpie 会自动更新**。一次手滑就是全量用户。
-- 包名、目录名、provider 命名都受模板约束，不能沿用现在的 `magpie-plugin-dumate`。
+- 包名、目录名、provider 命名都受模板约束，不能沿用现在的 `magpie-dumate`。
 - `icon` 在 registry 里可以是短名（如 `"kimi"`），不一定是 URL——具体看评审意见。
 
 ### 两条路怎么选
@@ -242,7 +242,7 @@ git grep -nE "[A-Za-z]:[\\\\/]{1,2}(Users|ProgramData|Documents)" -- .
 
 - 版本 `0.2.1`，19 个离线套件 / 31 个套件（`node run-tests.mjs --quick` = 98 pass / 0 fail）
 - 已按官方插件规范对齐（详见 README 变更记录 0.2.1）
-- 已发布：<https://github.com/R227BOUT/magpie-plugin-dumate>，`magpie-plugin` topic 已生效
+- 已发布：<https://github.com/R227BOUT/magpie-dumate>，`magpie-plugin` topic 已生效
 - 已脱敏：无硬编码本机路径、无真实余额数字、`.gitignore` 就位
 
 ## 脱敏与登录是两件不相干的事（常见误解）

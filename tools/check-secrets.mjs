@@ -71,7 +71,7 @@ const ALLOW = [
   "https%3A%2F%2Fconsole.bce.baidu.com%2F",
   "login.bce.baidu.com/?from=oa_dumate",
   // UPLOAD.md 里给读者的路径示例，不是作者机器的真实路径
-  "D:\\code\\magpie-plugin-dumate",
+  "D:\\code\\magpie-dumate",
   // 测试里故意用的假路径
   "C:/tmp/x.txt",
   "Z:/definitely/not/exist",

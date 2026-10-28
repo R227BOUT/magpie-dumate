@@ -1,5 +1,5 @@
 {
-  "name": "magpie-plugin-dumate",
+  "name": "magpie-dumate",
   "version": "0.2.1",
   "description": "Baidu DuMate (百度搭子) personal points as a Magpie provider: OpenAI-compatible models, daily check-in, balance display",
   "type": "module",
