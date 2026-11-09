@@ -42,6 +42,61 @@ const FALLBACK_MODELS = [
   { id: "dm-auto-model/text.L0", name: "DuMate Auto L0", context: 192_000, output: 128_000, reasoning: true },
 ]
 
+// ---- Live model catalog -----------------------------------------------------
+// The gateway does expose /models (the comment above FALLBACK_MODELS predates
+// it): a signed-in call lists ~40 ids — vendor models (deepseek-v4-pro, glm-5,
+// kimi-k3, qwen3.8-max, doubao-seed-2-0-pro, …) plus the routing aliases the
+// desktop app itself uses (model-text, dm-auto-model/text.L0/L1/L2, mm.*).
+// Discover them once an hour from the signed-in desktop session and fall back
+// to the two aliases above when anything fails.
+const CATALOG_TTL_MS = 60 * 60 * 1000
+let catalogCache = { at: 0, models: null }
+
+// Internal-only aliases the desktop app drives its own sub-features with; they
+// are not general chat models and would only clutter the picker.
+const INTERNAL_MODEL_RE = new RegExp(
+  "^(model-(artifact-validate|ppt-validate|coding-routing|gui-use|meeting-notes|mm|mm-fallback|reason-summary|routing|routing2|followup|aiassist|tm-.+)|qianfan-ocr|llm-mock|dumate-image.*)$",
+)
+
+async function discoverModels() {
+  if (catalogCache.models && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache.models
+  try {
+    const d = readDesktopLogin()
+    if (!d) return null
+    const header = d.cookies.map((c) => `${c.name}=${c.value}`).join("; ")
+    const cred = await fetchGatewayToken(header)
+    const res = await fetch(`${GATEWAY_BASE}/models`, {
+      headers: { Authorization: `Bearer ${cred.token}`, "User-Agent": UA },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) return null
+    const body = await res.json()
+    const list = Array.isArray(body?.data) ? body.data : []
+    const models = []
+    for (const m of list) {
+      const id = String(m?.id ?? "")
+      if (!id || INTERNAL_MODEL_RE.test(id)) continue
+      const ctx = Number(m?.limit?.input ?? 0) || 192_000
+      const out = Number(m?.limit?.output ?? 0) || 32_000
+      models.push({
+        id,
+        name: id,
+        context: Math.min(ctx, 1_000_000),
+        output: Math.min(out, 384_000),
+        reasoning: m?.thinking !== false,
+      })
+    }
+    // Keep the two aliases the desktop app itself uses even if the gateway
+    // stops listing them.
+    for (const m of FALLBACK_MODELS) if (!models.some((x) => x.id === m.id)) models.unshift(m)
+    if (!models.length) return null
+    catalogCache = { at: Date.now(), models }
+    return models
+  } catch {
+    return null
+  }
+}
+
 // ---- DuMate desktop login files (read-only) --------------------------------
 
 function desktopUserDataDir() {
@@ -49,7 +104,12 @@ function desktopUserDataDir() {
     const v = String(process.env[envKey] ?? "").trim()
     if (v) return v
   }
-  // Default install keeps userData on D: with a junction from AppData; follow
+  // macOS: the Electron app keeps userData under ~/Library/Application Support;
+  // there is no APPDATA there.
+  if (process.platform === "darwin") {
+    return join(process.env.HOME ?? "", "Library", "Application Support", "qianfan-desktop-app")
+  }
+  // Windows: default install keeps userData on D: with a junction from AppData; follow
   // the junction first, fall back to the standard Electron path.
   return join(process.env.APPDATA ?? "", "qianfan-desktop-app")
 }
@@ -353,7 +413,7 @@ export const DuMatePlugin = async () => {
         ...was,
         models: {
           ...Object.fromEntries(
-            FALLBACK_MODELS.map((m) => [
+            (await (discoverModels().catch(() => null)) ?? FALLBACK_MODELS).map((m) => [
               m.id,
               {
                 name: m.name,
