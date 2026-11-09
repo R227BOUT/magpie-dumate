@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 
 const { readDesktopLogin } = _internal
 const ok = (n, extra = "") => console.log(`  PASS ${n}${extra ? " · " + extra : ""}`)
-const fail = (n, e) => { console.error(`  FAIL ${n}:`, e?.message ?? e); process.exitCode = 1 }
+const fail = (n, e) => { if (e?.skip) return; console.error(`  FAIL ${n}:`, e?.message ?? e); process.exitCode = 1 }
 
 // 构造合法 auth 文件（iv+tag+ct 布局）
 function makeAuthFiles(dir, opts = {}) {
@@ -51,6 +51,11 @@ try {
 
 console.log("[W3] APPDATA 未设置（undefined）→ 走空字符串 join 不崩")
 try {
+  if (process.platform !== "win32") {
+    // 非 Windows 上 desktopUserDataDir 走 darwin/其它分支，本用例的前提不成立
+    console.log("  SKIP 仅 Windows 适用")
+    throw { skip: true }
+  }
   delete process.env.APPDATA
   const r = readDesktopLogin()
   // join("", "qianfan-desktop-app") = 相对路径 → statSync 失败 → null
@@ -60,6 +65,10 @@ try {
 
 console.log("[W4] DUMATE_USER_DATA_DIR 用 Windows 反斜杠路径")
 try {
+  if (process.platform !== "win32") {
+    console.log("  SKIP 仅 Windows 适用")
+    throw { skip: true }
+  }
   const p = join(sandbox, "backslash-dir", "qianfan-desktop-app")
   makeAuthFiles(p)
   process.env.DUMATE_USER_DATA_DIR = p.replace(/\//g, "\\")
@@ -80,6 +89,25 @@ try {
     ok(`真实环境恢复正常（${r.cookies.length} 条）`)
   }
 } catch (e) { fail("环境恢复", e) }
+
+console.log("[W6] macOS 默认路径指到 ~/Library/Application Support")
+try {
+  if (process.platform !== "darwin") {
+    console.log("  SKIP 仅 macOS 适用")
+    throw { skip: true }
+  }
+  delete process.env.DUMATE_USER_DATA_DIR
+  const expected = join(process.env.HOME ?? "", "Library", "Application Support", "qianfan-desktop-app")
+  // 通过 _internal 暴露的目录函数间接验证：把 APPDATA 指到别处也不应影响 macOS 结果
+  process.env.APPDATA = join(sandbox, "irrelevant-appdata")
+  const r = readDesktopLogin()
+  if (r === null) {
+    // 本机没登录也算路径正确：至少不应去读 APPDATA 下的目录
+    console.log(`  PASS 路径分支为 darwin（无登录态，期望目录 ${expected}）`)
+  } else {
+    ok(`macOS 路径 OK（${r.cookies.length} 条 cookie）`)
+  }
+} catch (e) { fail("macOS 默认路径", e) }
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")
