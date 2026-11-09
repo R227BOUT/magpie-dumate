@@ -49,7 +49,12 @@ function desktopUserDataDir() {
     const v = String(process.env[envKey] ?? "").trim()
     if (v) return v
   }
-  // Default install keeps userData on D: with a junction from AppData; follow
+  // macOS: the Electron app keeps userData under ~/Library/Application Support;
+  // there is no APPDATA there.
+  if (process.platform === "darwin") {
+    return join(process.env.HOME ?? "", "Library", "Application Support", "qianfan-desktop-app")
+  }
+  // Windows: default install keeps userData on D: with a junction from AppData; follow
   // the junction first, fall back to the standard Electron path.
   return join(process.env.APPDATA ?? "", "qianfan-desktop-app")
 }
