@@ -5,8 +5,46 @@ OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan �
 把 DuMate 账号的个人模型积分额度接入 Magpie：登录后即可在任意 agent 里使用
 `dumate/model-text`（智能路由）等模型，调用消耗 DuMate 积分。
 
+## 致谢：0.3.0 的问题发现与方案来源
+
+本插件 0.2.1 及更早版本有一个**只在非 Windows 上暴露**的缺陷，是公众号
+**「HelloRanceLee」（作者 RanceLee）** 在 2026-11-13 的文章
+[《一分钱购百度搭子月卡，可以无限叠加！可用 DS V4.1F 等模型》](https://mp.weixin.qq.com/s?__biz=MzU2NzcwOTQyMQ==&mid=2247486099&idx=1&sn=94e83c5a14f73b6ec99cf1df29ffe188)
+中首先指出、并给出完整解决思路的：
+
+> 「不过这个插件有点问题，就是它只默认搜索 Windows 电脑的状态，我 Mac 桌面版的有问题」
+
+他不只是报了现象。原文附的排查提示词把修复边界写得清清楚楚：确认真实安装位置与登录数据
+（不能只按默认路径猜）、补齐当前操作系统的正确路径并保留自定义路径优先级、按**当前激活账号**
+定位 `opencode.json`、只导入模型元数据并**独立持久化**（卸载 DuMate 后不能把模型清空）、
+区分显示名与真实 API id、不把 `127.0.0.1` 本地代理当成云端 API、卸载独立性必须用
+**新进程重新取 token** 来验证……他还开源了自己的实现
+[RanceLee233/dumate-rance](https://github.com/RanceLee233/dumate-rance)。
+
+本仓库 0.3.0 的跨平台路径识别、真实模型清单导入、快照回退、上下文与推理档位、
+请求地址约束，都是按他发现的问题和提出的方案落地的。
+**感谢 RanceLee 的实测定位、完整思路与公开分享**——尤其是「没测到不许写成通过」
+那几条约束，直接决定了这次修复的验证方式。
+
+| 项目 | 内容 |
+|---|---|
+| 问题发现者 | RanceLee（公众号 HelloRanceLee） |
+| 原文 | [微信公众号 · 2026-11-13](https://mp.weixin.qq.com/s?__biz=MzU2NzcwOTQyMQ==&mid=2247486099&idx=1&sn=94e83c5a14f73b6ec99cf1df29ffe188) |
+| 参考实现 | [RanceLee233/dumate-rance](https://github.com/RanceLee233/dumate-rance)（MIT，派生自本仓库 0.2.1） |
+| 许可证 | 本仓库 MIT，原始版权声明保留在 `LICENSE` |
+
 ## 功能
 
+- **跨平台桌面登录识别**（0.3.0）：macOS `~/Library/Application Support/qianfan-desktop-app/`、
+  Windows `%APPDATA%\qianfan-desktop-app\`、Linux `$XDG_CONFIG_HOME/qianfan-desktop-app/`。
+  `DUMATE_USER_DATA_DIR` 在任何平台都优先。0.2.1 只拼 `%APPDATA%`，在 Mac / Linux 上
+  该变量为空、退化成相对路径，桌面登录态永远找不到——这正是上面致谢里报告的问题。
+- **真实模型清单**（0.3.0）：从**当前激活账号**的
+  `<数据目录>/qianfan_desk_xdg/<账号>/config/opencode/opencode.json` 读取
+  `provider.QianfanPersonalQuota.models`，只导入 id / 名称 / 上下文与输出上限 / 输入模态，
+  排除内部任务路由、mock、OCR、向量与重排入口；对重复 API id 去重。纯元数据快照独立保存在
+  `~/.config/magpie/magpie-dumate/models.snapshot.json`，源文件删除或损坏时用最近一次有效清单，
+  新装且无快照时回退包内带日期的参考清单。**清单存在 ≠ 账号有调用权限。**
 - **模型调用**：`https://dumate-svc.baidu.com/gateway/apis/v1/chat/completions`（OpenAI 兼容），
   凭据链路 = Cookie → `/api/dumate/app/token/get` 换 gateway token → `Authorization: Bearer`。
   token 自动缓存与续期（服务端有效期约 14 小时，插件每小时主动刷新）。
@@ -136,8 +174,8 @@ nothing is installed"），所以以后改 `index.mjs` 只要重载就生效，�
 ## 测试
 
 ```bash
-node run-tests.mjs --quick   # 19 个离线套件，不联网不耗积分（约 2 分钟）
-node run-tests.mjs           # 全部 31 套件（真实调用网关，消耗少量积分）
+node run-tests.mjs --quick   # 21 个离线套件，不联网不耗积分（约 2 分钟）
+node run-tests.mjs           # 全部 33 套件（真实调用网关，消耗少量积分）
 node run-tests.mjs test-smoke test-stress   # 只跑指定套件
 node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（秒级）
 ```
@@ -159,6 +197,8 @@ node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（
 | test-config-edge | config/models hook 契约与幂等 |
 | test-checkin-branches | checkin 五分支（fetch mock） |
 | test-desktop-paths | 桌面登录路径矩阵 + auth.json 容错 |
+| test-macos-paths | 三平台路径 / 覆盖优先级 / 激活账号定位 / 目录注入防护 |
+| test-model-catalog | 模型元数据隔离 / 别名去重 / 快照回退 / V4.1 推理档位 |
 | test-token-lifecycle | token 单飞 / 刷新边界 / 异常形态 |
 | test-delivery-review | 交付链审查（指引/文档/报错/路径） |
 | test-edge-cases | 401 自愈 / windows 计算 / null 字段 |
@@ -192,21 +232,53 @@ node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（
 
 ## 模型
 
-| ID | 说明 |
-|---|---|
-| `model-text` | 智能路由（桌面端同款默认，网关自动选择上游） |
-| `dm-auto-model/text.L0` | Auto L0 路由 |
+插件按三层合并，后一层覆盖前一层同 id 的条目：
 
-网关未提供 /models 端点，清单为固定回退表。上游真实模型由网关侧决定，
-API 层不暴露（响应始终回显 `model-text`，id 前缀 `gd-`）；桌面端抓包曾观察到
-deepseek-v4-flash-low-latency / qwen35-35b-a3b，但那不是接口契约，不要依赖它。
+1. **固定回退表**（没有 DuMate、没有快照时的保底，provider 仍能注册）：
+
+   | ID | 说明 |
+   |---|---|
+   | `model-text` | 智能路由（桌面端同款默认，网关自动选择上游） |
+   | `dm-auto-model/text.L0` | Auto L0 路由 |
+
+2. **真实清单**（0.3.0）：当前激活账号 `opencode.json` 里的对话入口，带真实
+   `limit.context` / `limit.output` 与输入模态。显示名可能只是别名（例如旧配置的
+   `glm-5` 实际调用 `model-text`），插件会把真实 API id 标进名称。
+3. **用户在 magpie 里手动添加的模型与自定义设置**：优先级最高，导入不会覆盖。
+
+本机 2026-11-13 实测：源文件 45 个条目，排除内部任务路由、mock、OCR、向量、
+重排与专用文生图入口后得到 **22 个对话入口**，含 `deepseek-v41-flash`
+（渠道声明 1,000,000 输入/上下文、384,000 最大输出、支持图像输入）。
+这是**渠道声明值，没有做百万 tokens 极限测试**；不同账号、不同客户端版本清单数量会不同，
+清单存在也不等于有调用权限。
+
+包内 `models.default.json` 是 RanceLee 在 2026-11-13 分享的参考清单（`asOf` 带日期），
+**只在源文件与快照都不可用时使用**，既不是本机实测，也不承诺账号能调用其中每个模型。
+
+V4.1 的推理档位统一为 `none / low / high / max`，插件只对 `deepseek-v41-flash` 映射：
+`none` 显式关闭思考、`low` 归一为 `high`（百度侧两者本来同强度）、`high / max` 保留并开启。
+四档只是为了切换供应商时不丢选择，**不代表上游有四种不同的计算预算**。
+
+配置文件里的 `127.0.0.1` 是 DuMate 内置 OpenCode 的本地代理，不是卸载后还能用的云端 API。
+本插件只请求 `dumate-svc.baidu.com` 的官方 chat 端点，拒绝其他地址与重定向。
+快照只解决「模型清单还在」，**不延长登录有效期**：本次只离线验证了源文件缺失时清单仍能加载，
+没有验证卸载客户端后新进程取 token 的长期续期，因此**不承诺可以安全卸载 DuMate**。
 
 ## 安全说明
 
 - Cookie 明文包含 BDUSS/STOKEN 等百度账号凭据，等同意志级凭据：插件只在内存中使用，
   持久化由 magpie `plugin-auth.json` 统一管理（与所有官方插件一致）。
-- 桌面端登录态为只读复用，绝不写 DuMate 数据目录任何文件。
-- 自定义 DuMate 数据目录：设置环境变量 `DUMATE_USER_DATA_DIR`。
+- 桌面端登录态为**只读复用**，绝不写 DuMate 数据目录任何文件。
+- 0.3.0 起插件会写**一个**文件：magpie 自己配置目录下的
+  `magpie-dumate/models.snapshot.json`（权限 0600）。里面只有模型元数据，
+  不含 Cookie、token、apiKey、源文件路径或任何 endpoint。`index.mjs` 依然零写文件调用，
+  「插件只读 DuMate 登录态」的承诺不变。
+- 三个出站请求（token/积分 ×2 + 聊天）都用 `redirect: "manual"`：绝不带 Cookie / gateway token
+  跟随重定向，同时保留 3xx 响应并判为登录失效。直接用 `redirect: "error"` 会让坏凭据
+  退化成普通 502、丢掉 `signIn=expired`——这个回归是本次全量测试抓到后修掉的。
+  聊天请求还校验目标必须是官方 chat 端点，其他地址返回 400。
+- 自定义 DuMate 数据目录：设置环境变量 `DUMATE_USER_DATA_DIR`（三个平台都优先）。
+- 手动指定模型配置文件：`DUMATE_OPENCODE_CONFIG`，必须是绝对路径，否则忽略。
 
 ## 已验证接口（2026-10 实测）
 
@@ -220,6 +292,41 @@ deepseek-v4-flash-low-latency / qwen35-35b-a3b，但那不是接口契约，不�
 | `dumate-svc.baidu.com/gateway/apis/v1/chat/completions` | POST | 模型调用（消耗积分） |
 
 ## 变更记录
+
+### 0.3.0（2026-11-13 修复 macOS 登录识别 + 导入真实模型清单）
+
+本轮问题由公众号「HelloRanceLee」作者 **RanceLee** 在当天的文章中发现并提出完整解决方案，
+参考实现见 [RanceLee233/dumate-rance](https://github.com/RanceLee233/dumate-rance)。
+详见开头「致谢」。逐条落地：
+
+- 🔴 **只在 Windows 找登录态**：`desktopUserDataDir()` 原来只拼 `%APPDATA%`，macOS / Linux 上
+  该变量为空 → 相对路径 → `auth.json` 永远读不到。改为 `paths.mjs` 按系统分流：
+  darwin → `~/Library/Application Support/`、linux → `$XDG_CONFIG_HOME`、win32 保持原语义；
+  `DUMATE_USER_DATA_DIR` 仍覆盖一切默认值。
+- 🔴 **只有 2 个硬编码模型、缺上下文长度**：新增 `models.mjs`，按**激活账号**定位
+  `qianfan_desk_xdg/<账号>/config/opencode/opencode.json`，读
+  `provider.QianfanPersonalQuota.models`，只取 id / 名称 / limit / 模态；排除内部任务、
+  mock、OCR、embedding、reranker 与文生图入口，重复 API id 去重。
+- **账号选错**：`accountId` 原来固定取 `accountProfiles[0]`，改为优先取 `activeProfileId`
+  对应的 profile；无激活信息时只在唯一账号目录下自动选，多账号不猜。
+- **独立于 DuMate 卸载**：导入成功后把纯元数据快照写进 magpie 配置目录；源文件删除或损坏
+  用最近一次有效清单，新装且无快照才回退包内带日期的 `models.default.json`。
+- **区分显示名与真实 API id**：`glm-5` 这类别名在名称里标注 `(API: model-text)`。
+- **V4.1 推理档位**：`reasoning.mjs` 让 `none` 显式关闭思考、`low` 归一为 `high`，
+  `high / max` 保留；只作用于 `deepseek-v41-flash`，其他模型与非 JSON 请求不改写。
+- **请求面收窄**：三个出站请求都用 `redirect: "manual"`（不跟随、保留 3xx）；loader 校验
+  目标必须是官方 chat 端点，其他地址返回 400，避免 gateway token 被带到别处。
+- 🔴 **全量测试抓到并修掉一处自身回归**：最初按参考实现写的是 `redirect: "error"`，
+  `test-concurrency` 的坏凭据用例立刻从 401 变成 502（`expected 401 got 502`）——
+  百度把失效会话 302 到登录页，硬拒绝重定向后连 HTML 都读不到，`signIn=expired` 丢失。
+  改为 `manual` + 3xx 判定后恢复；`test-model-catalog` 的 C12 静态哨兵防止再退回去。
+- **凭据隔离**：源配置里的 `apiKey` / `headers` / `plugins` / 本地代理地址一个都不导入；
+  快照回读时再过一遍同一把过滤器，被塞进来的额外字段也带不出去。
+- **新增 2 个离线套件**：`test-macos-paths`（10 项）与 `test-model-catalog`（11 项），
+  覆盖三平台路径、覆盖优先级、激活账号、路径注入、元数据隔离、快照回退与推理档位。
+- `package.json` 升到 0.3.0，`files` 补齐 4 个新模块——漏了会导致装上的插件缺文件。
+- **验证边界**：本机 Windows 只做了离线注入测试与真实清单导入（22 个对话入口），
+  **没有**真实 Mac 环境、没有验证卸载客户端后的长期续期，因此不宣称 macOS 真机通过或可安全卸载。
 
 ### 0.2.1（2026-10-26 对照官方插件规范整改 + 准备公开）
 
@@ -251,6 +358,6 @@ deepseek-v4-flash-low-latency / qwen35-35b-a3b，但那不是接口契约，不�
 - 安装说明补齐「`magpie` 不在 PATH」这一最常见失败：绿色版默认不进 PATH，给出完整路径调用与写 PATH 两种做法。
   （不要为了省事把 exe 改名成 `magpie.exe`：GUI 的 WebView2 用户数据目录按 exe 文件名生成，
   改名会让 `%APPDATA%\magpie-windows-amd64.exe` 被弃用，登录态与缓存看起来"消失"。）
-- 测试体系：31 个套件（19 个离线套件、不联网零积分；另 12 个联网套件真实调用网关），
+- 测试体系：33 个套件（21 个离线套件、不联网零积分；另 12 个联网套件真实调用网关），
   含 11 个已修 bug 的回归哨兵、性能基线、安全审查、隐私审计、确定性验证、文档一致性守门。
   套件数量由 `test-docs-audit` 断言把守；用例数随迭代变化，以 runner 输出为准。

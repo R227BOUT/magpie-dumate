@@ -1,12 +1,16 @@
 {
   "name": "magpie-dumate",
-  "version": "0.2.1",
-  "description": "Baidu DuMate (百度搭子) personal points as a Magpie provider: OpenAI-compatible models, daily check-in, balance display",
+  "version": "0.3.0",
+  "description": "Baidu DuMate (百度搭子) personal points as a Magpie provider: cross-platform desktop sign-in, real model catalog, daily check-in, balance display",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "files": [
     "index.mjs",
+    "paths.mjs",
+    "models.mjs",
+    "models.default.json",
+    "reasoning.mjs",
     "icon.png",
     "icon.svg",
     "run-tests.mjs",

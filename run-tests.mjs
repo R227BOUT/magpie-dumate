@@ -12,7 +12,7 @@ const args = process.argv.slice(2)
 const quick = args.includes("--quick")
 const only = args.filter((a) => !a.startsWith("--"))
 
-const OFFLINE = ["test-unit", "test-static", "test-config-edge", "test-checkin-branches", "test-desktop-paths", "test-token-lifecycle", "test-delivery-review", "test-edge-cases", "test-bug-regression", "test-determinism", "test-upgrade-compat", "test-security", "test-sse-robustness", "test-docs-audit", "test-points-audit", "test-client-fingerprint", "test-release-ready", "test-windows-paths", "test-privacy"]
+const OFFLINE = ["test-unit", "test-static", "test-config-edge", "test-checkin-branches", "test-desktop-paths", "test-macos-paths", "test-model-catalog", "test-token-lifecycle", "test-delivery-review", "test-edge-cases", "test-bug-regression", "test-determinism", "test-upgrade-compat", "test-security", "test-sse-robustness", "test-docs-audit", "test-points-audit", "test-client-fingerprint", "test-release-ready", "test-windows-paths", "test-privacy"]
 const ONLINE = ["test-smoke", "test-stream-tools", "test-concurrency", "test-browser-login", "test-loader-real", "test-multi-turn", "test-checkin-real-fields", "test-agent-session", "test-stress", "test-model-routing", "test-perf-baseline", "test-llm-edge"]
 const suites = (quick ? OFFLINE : [...OFFLINE, ...ONLINE]).filter((s) => !only.length || only.includes(s))
 

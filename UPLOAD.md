@@ -240,10 +240,12 @@ git grep -nE "[A-Za-z]:[\\\\/]{1,2}(Users|ProgramData|Documents)" -- .
 
 ## 当前状态
 
-- 版本 `0.2.1`，19 个离线套件 / 31 个套件（`node run-tests.mjs --quick` = 98 pass / 0 fail）
-- 已按官方插件规范对齐（详见 README 变更记录 0.2.1）
+- 版本 `0.3.0`，21 个离线套件 / 33 个套件（`node run-tests.mjs --quick` 全绿）
+- 已按官方插件规范对齐（详见 README 变更记录 0.3.0 / 0.2.1）
 - 已发布：<https://github.com/R227BOUT/magpie-dumate>，`magpie-plugin` topic 已生效
 - 已脱敏：无硬编码本机路径、无真实余额数字、`.gitignore` 就位
+- 🔴 发版前确认 `package.json` 的 `files` 包含 `paths.mjs` / `models.mjs` /
+  `models.default.json` / `reasoning.mjs`：少一个，装上的插件就会在 import 时报错
 
 ## 脱敏与登录是两件不相干的事（常见误解）
 

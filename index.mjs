@@ -7,7 +7,7 @@
 // sign-in. Cookies are exchanged per-session for a gateway token via
 // /api/dumate/app/token/get, then chats go straight to
 // https://dumate-svc.baidu.com/gateway/apis/v1/chat/completions (OpenAI-compatible)
-// and burn the account's personal points. Daily check-in claims +500 points.
+// and burn the account's personal points. Check-in amounts follow the server.
 //
 // Login methods:
 //   1. desktop  — reuse the local DuMate app login (read-only, recommended)
@@ -16,10 +16,18 @@
 //                 → Network (httpOnly cookies are required, so document.cookie
 //                 will NOT work); no DuMate install needed
 //   3. manual   — paste a "name=value; ..." cookie string directly
+//
+// 0.3.0: cross-platform desktop paths, the real per-account model catalog and
+// V4.1 reasoning controls were fixed after RanceLee (公众号 HelloRanceLee)
+// reported the macOS sign-in failure and proposed the solution on 2026-11-13.
+// See README.md -> 致谢.
 
 import { createDecipheriv } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { desktopUserDataDir } from "./paths.mjs"
+import { loadModels } from "./models.mjs"
+import { normalizeReasoningBody } from "./reasoning.mjs"
 
 const PROVIDER_ID = "dumate"
 const PROVIDER_NAME = "百度搭子 DuMate"
@@ -43,16 +51,10 @@ const FALLBACK_MODELS = [
 ]
 
 // ---- DuMate desktop login files (read-only) --------------------------------
-
-function desktopUserDataDir() {
-  for (const envKey of ["DUMATE_USER_DATA_DIR"]) {
-    const v = String(process.env[envKey] ?? "").trim()
-    if (v) return v
-  }
-  // Default install keeps userData on D: with a junction from AppData; follow
-  // the junction first, fall back to the standard Electron path.
-  return join(process.env.APPDATA ?? "", "qianfan-desktop-app")
-}
+// desktopUserDataDir() now lives in ./paths.mjs: macOS uses ~/Library/Application
+// Support, Linux uses $XDG_CONFIG_HOME, Windows keeps %APPDATA%. A Windows
+// install that redirects userData through a junction is followed by the OS.
+// DUMATE_USER_DATA_DIR still overrides every platform default.
 
 // The provider's picture, as magpie reads it: a data:image URI on the auth hook.
 // Preference order, first hit wins:
@@ -142,7 +144,7 @@ function readDesktopLogin() {
       : null
     return {
       cookies: arr,
-      accountId: String(auth?.accountProfiles?.[0]?.bceAccountId ?? ""),
+      accountId: String(profile?.bceAccountId ?? auth?.accountProfiles?.[0]?.bceAccountId ?? ""),
       name: String(profile?.displayName ?? auth?.accountProfiles?.[0]?.displayName ?? ""),
       source: "desktop",
     }
@@ -254,8 +256,14 @@ async function consoleGet(path, cookieStr) {
       Accept: "application/json",
       Referer: `${CONSOLE_BASE}/`,
     },
+    // Never follow a redirect with cookies attached. Keep the 3xx response
+    // instead of rejecting it: an expired session is usually a 302 to the
+    // login page, and a hard redirect error would wrongly degrade the
+    // signIn=expired signal into a generic 502.
+    redirect: "manual",
     signal: AbortSignal.timeout(20_000),
   })
+  if (res.status >= 300 && res.status < 400) throw htmlSignInError()
   const text = await res.text()
   let payload = null
   try { payload = JSON.parse(text) } catch {}
@@ -286,8 +294,10 @@ async function consolePost(path, body, cookies) {
       Accept: "application/json",
     },
     body: JSON.stringify(body ?? {}),
+    redirect: "manual",
     signal: AbortSignal.timeout(20_000),
   })
+  if (res.status >= 300 && res.status < 400) throw htmlSignInError()
   const text = await res.text()
   let payload = null
   try { payload = JSON.parse(text) } catch {}
@@ -325,7 +335,7 @@ async function fetchGatewayToken(cookieHeader) {
 
 // ---- Plugin ----------------------------------------------------------------
 
-export const DuMatePlugin = async () => {
+export const DuMatePlugin = async (input = {}) => {
   const consoleCookies = async (auth) => {
     if (auth?.type !== "oauth" || !Array.isArray(auth.cookies) || !auth.cookies.length) throw signInError(auth)
     return auth.cookies
@@ -365,6 +375,10 @@ export const DuMatePlugin = async () => {
               },
             ]),
           ),
+          // Real catalog from the active DuMate account (metadata only).
+          // Falls back to the last snapshot / shipped reference when the
+          // desktop config is gone. User-added models stay last and win.
+          ...loadModels({ stateDir: input.directory }),
           ...(was.models ?? {}),
         },
       }
@@ -436,8 +450,24 @@ export const DuMatePlugin = async () => {
           apiKey: "dumate",
           async fetch(input, init = {}) {
             const req = input instanceof Request ? input : null
+            // Only the official chat endpoint may receive the gateway token.
+            // A redirect or a rewritten URL must never leak it elsewhere.
+            let target
+            try { target = new URL(req ? req.url : String(input)) } catch {
+              // Unparseable URL - rejected below.
+            }
+            const gateway = new URL(GATEWAY_BASE)
+            if (!target || target.origin !== gateway.origin ||
+                target.pathname !== gateway.pathname + "/chat/completions" ||
+                target.username || target.password) {
+              return new Response(
+                JSON.stringify({ error: { message: "DuMate 仅允许请求官方聊天接口", type: "invalid_request_error" } }),
+                { status: 400, headers: { "Content-Type": "application/json" } },
+              )
+            }
             let bodyText = init?.body
             if (bodyText === undefined && req) bodyText = await req.clone().text()
+            bodyText = normalizeReasoningBody(bodyText)
             let cred
             try {
               cred = await fetchGatewayToken(cookieHeaderOf(cookies))
@@ -458,8 +488,12 @@ export const DuMatePlugin = async () => {
               method: init?.method ?? req?.method ?? "POST",
               headers,
               body: bodyText,
+              // Same rule as the console calls: never follow a redirect with
+              // the gateway token, but keep the 3xx so it can be reported as
+              // an expired session instead of an unhandled network error.
+              redirect: "manual",
             })
-            if (res.status === 401) {
+            if ((res.status >= 300 && res.status < 400) || res.status === 401) {
               tokenCache.delete(cookieHeaderOf(cookies))
               return new Response(
                 JSON.stringify({ error: { message: "DuMate gateway token 已失效并清除缓存，请重试或重新登录", type: "authentication_error" } }),
@@ -726,6 +760,7 @@ export const _internal = {
   buildCookieHeader,
   extractCsrfToken,
   readDesktopLogin,
+  desktopUserDataDir,
   iconFromPluginDir,
   iconFromDesktopApp,
   iconFromBundle,
