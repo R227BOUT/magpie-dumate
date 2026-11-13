@@ -42,6 +42,43 @@ const FALLBACK_MODELS = [
   { id: "dm-auto-model/text.L0", name: "DuMate Auto L0", context: 192_000, output: 128_000, reasoning: true },
 ]
 
+// The gateway does expose a catalog now (verified 2026-11-13: GET
+// {GATEWAY_BASE}/models returns ~43 entries with per-model limits and
+// modalities), so the two aliases above are only a fallback for when that call
+// fails. Non-chat entries — routers, per-feature helpers, embedding and
+// reranker models — are filtered out; nobody should pick those from a list.
+const INTERNAL_MODEL_RE =
+  /^(model-(routing|routing2|followup|ppt-validate|artifact-validate|meeting-notes|reason-summary|wiki|gui-use|aiassist|coding-routing|mm-fallback|tm-)|llm-mock|qwen3-embedding|qwen3-reranker)/i
+
+function isChatModel(id) {
+  return !!id && !INTERNAL_MODEL_RE.test(String(id))
+}
+
+function modelDefFromGateway(m) {
+  const input = Array.isArray(m?.modalities?.input) && m.modalities.input.length ? m.modalities.input : ["text"]
+  return {
+    name: m?.name || m?.id,
+    limit: { context: m?.limit?.input ?? 200_000, output: m?.limit?.output ?? 32_000 },
+    tool_call: true,
+    reasoning: true,
+    attachment: input.includes("image"),
+    modalities: { input, output: ["text"] },
+  }
+}
+
+// [id, def] pairs for every chat model the gateway advertises. Throws when the
+// gateway does not answer, so the caller can fall back to FALLBACK_MODELS.
+async function listGatewayModels(token) {
+  const res = await fetch(`${GATEWAY_BASE}/models`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "User-Agent": UA },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!res.ok) throw new Error(`gateway /models HTTP ${res.status}`)
+  const json = await res.json()
+  const rows = Array.isArray(json?.data) ? json.data : []
+  return rows.filter((m) => isChatModel(m?.id)).map((m) => [m.id, modelDefFromGateway(m)])
+}
+
 // ---- DuMate desktop login files (read-only) --------------------------------
 
 function desktopUserDataDir() {
@@ -372,7 +409,18 @@ export const DuMatePlugin = async () => {
 
     provider: {
       id: PROVIDER_ID,
-      async models(provider) {
+      // Live catalog when the gateway answers; the auto-routing aliases in
+      // FALLBACK_MODELS keep the provider usable when it does not.
+      async models(provider, { auth } = {}) {
+        if (auth?.type === "oauth" && Array.isArray(auth.cookies) && auth.cookies.length) {
+          try {
+            const { token } = await fetchGatewayToken(cookieHeaderOf(auth.cookies))
+            const pairs = await listGatewayModels(token)
+            if (pairs.length) return Object.fromEntries(pairs)
+          } catch {
+            // fall through to the static list
+          }
+        }
         return provider.models
       },
     },
