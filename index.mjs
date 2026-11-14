@@ -50,6 +50,37 @@ const FALLBACK_MODELS = [
   { id: "dm-auto-model/text.L0", name: "DuMate Auto L0", context: 192_000, output: 128_000, reasoning: true },
 ]
 
+// The id actually sent upstream for a catalog entry. Imported entries carry an
+// explicit `id` (DuMate's own config may name one model twice: key "glm-5" with
+// `id: "model-text"`); fallback and user entries are keyed by that id already.
+function upstreamIdOf(key, def) {
+  const id = def?.id
+  return typeof id === "string" && id ? id : key
+}
+
+// Drop entries that cannot change what reaches the gateway.
+//
+// importModels() already skips an alias when its target is present in the same
+// source config, but the catalog magpie lists is assembled from TWO sources:
+// FALLBACK_MODELS plus the imported/snapshot entries. An account whose
+// opencode.json only defines the alias ("glm-5" -> id "model-text") therefore
+// ends up exposing "model-text" (from the fallback) AND "glm-5" (from the
+// account), both sending "model-text" — two picker rows that are one request.
+// Collapse them after the merge, keeping the entry whose key is the upstream id
+// so the surviving row is named after what is actually called.
+function collapseAliases(models) {
+  const canonical = new Set()
+  for (const [key, def] of Object.entries(models)) {
+    if (upstreamIdOf(key, def) === key) canonical.add(key)
+  }
+  const collapsed = {}
+  for (const [key, def] of Object.entries(models)) {
+    if (upstreamIdOf(key, def) !== key && canonical.has(upstreamIdOf(key, def))) continue
+    collapsed[key] = def
+  }
+  return collapsed
+}
+
 // ---- DuMate desktop login files (read-only) --------------------------------
 // desktopUserDataDir() now lives in ./paths.mjs: macOS uses ~/Library/Application
 // Support, Linux uses $XDG_CONFIG_HOME, Windows keeps %APPDATA%. A Windows
@@ -362,23 +393,28 @@ export const DuMatePlugin = async (input = {}) => {
         api: GATEWAY_BASE,
         ...was,
         models: {
-          ...Object.fromEntries(
-            FALLBACK_MODELS.map((m) => [
-              m.id,
-              {
-                name: m.name,
-                limit: { context: m.context, output: m.output },
-                tool_call: true,
-                reasoning: !!m.reasoning,
-                attachment: false,
-                modalities: { input: ["text"], output: ["text"] },
-              },
-            ]),
-          ),
-          // Real catalog from the active DuMate account (metadata only).
-          // Falls back to the last snapshot / shipped reference when the
-          // desktop config is gone. User-added models stay last and win.
-          ...loadModels({ stateDir: input.directory }),
+          // Collapsed so one upstream model cannot occupy two picker rows; see
+          // collapseAliases(). User-added models are applied afterwards and are
+          // never dropped — an explicit choice in the profile wins untouched.
+          ...collapseAliases({
+            ...Object.fromEntries(
+              FALLBACK_MODELS.map((m) => [
+                m.id,
+                {
+                  name: m.name,
+                  limit: { context: m.context, output: m.output },
+                  tool_call: true,
+                  reasoning: !!m.reasoning,
+                  attachment: false,
+                  modalities: { input: ["text"], output: ["text"] },
+                },
+              ]),
+            ),
+            // Real catalog from the active DuMate account (metadata only).
+            // Falls back to the last snapshot / shipped reference when the
+            // desktop config is gone.
+            ...loadModels({ stateDir: input.directory }),
+          }),
           ...(was.models ?? {}),
         },
       }

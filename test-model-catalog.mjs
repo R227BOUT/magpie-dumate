@@ -200,5 +200,48 @@ try {
   ok("3 处 manual + 3 处 3xx 判定，安全与错误语义兼顾")
 } catch (e) { fail("重定向策略", e) }
 
+console.log("[C13] 合并兜底清单后，同一上游模型只留一个入口（跨来源别名去重）")
+try {
+  const aliasDir = join(dir, "alias-merge")
+  const aliasSnapshot = join(aliasDir, SNAPSHOT_DIR_NAME, "models.snapshot.json")
+  mkdirSync(join(aliasDir, SNAPSHOT_DIR_NAME), { recursive: true })
+  // 真实账号只定义了别名键：「glm-5」的 id 就是「model-text」。
+  // 兜底清单里本来就有 model-text，合并后两者会同时出现在选择器里。
+  writeFileSync(aliasSnapshot, JSON.stringify({
+    schema: 1,
+    models: {
+      "glm-5": { id: "model-text", limit: { context: 192000, output: 128000 }, modalities: { input: ["text"] } },
+    },
+  }))
+  const previous = process.env.DUMATE_OPENCODE_CONFIG
+  // 指向不存在的绝对路径：强制走快照分支，结果与运行机器无关。
+  process.env.DUMATE_OPENCODE_CONFIG = join(aliasDir, "absent-opencode.json")
+  try {
+    const plugin = await DuMatePlugin({ directory: aliasDir })
+    const config = {}
+    await plugin.config(config)
+    const m = config.provider.dumate.models
+    const byUpstream = new Map()
+    for (const [key, def] of Object.entries(m)) {
+      const upstream = typeof def?.id === "string" && def.id ? def.id : key
+      byUpstream.set(upstream, [...(byUpstream.get(upstream) ?? []), key])
+    }
+    const dupes = [...byUpstream].filter(([, keys]) => keys.length > 1)
+    if (dupes.length) throw new Error("同一上游出现多个入口: " + dupes.map(([u, k]) => `${u} <- ${k.join(" / ")}`).join("; "))
+    if (!m["model-text"]) throw new Error("兜底入口被误删")
+    if (m["glm-5"]) throw new Error("别名入口未被合并")
+
+    // 用户在 profile 里显式写的条目不受合并规则影响（显式选择优先）。
+    const explicit = await DuMatePlugin({ directory: aliasDir })
+    const withUser = { provider: { dumate: { models: { "glm-5": { name: "我加的别名", id: "model-text", limit: { context: 4096, output: 512 } } } } } }
+    await explicit.config(withUser)
+    if (!withUser.provider.dumate.models["glm-5"]) throw new Error("用户显式别名被合并规则误删")
+    ok(`合并后 ${Object.keys(m).length} 个入口、上游一一对应；用户显式条目保留`)
+  } finally {
+    if (previous === undefined) delete process.env.DUMATE_OPENCODE_CONFIG
+    else process.env.DUMATE_OPENCODE_CONFIG = previous
+  }
+} catch (e) { fail("跨来源别名合并", e) }
+
 rmSync(dir, { recursive: true, force: true })
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")
