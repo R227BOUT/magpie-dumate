@@ -225,6 +225,12 @@ const cardText = (value, max = 200) => {
   return points.length > max ? points.slice(0, max).join("") : cleaned
 }
 
+const formatBeijingDateTime = (ms) => {
+  const d = new Date(ms + 8 * 3600_000)
+  const pad = (n) => String(n).padStart(2, "0")
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
+}
+
 // checkin runs under a shared 2-minute budget across every provider's accounts,
 // asked one account at a time; a slow account must not eat the others' share.
 // A hook cut short answers failed, which the host retries in half an hour.
@@ -560,6 +566,17 @@ export const DuMatePlugin = async (input = {}) => {
                   ? { runsOutAt: new Date(soonest.ms).toISOString(), runsOut: Math.min(total - used, soonest.points) }
                   : {}),
               },
+              ...(soonest
+                ? [
+                    {
+                      name: "最近到期",
+                      used: 0,
+                      display: `${formatBeijingDateTime(soonest.ms)} (${Math.min(total - used, soonest.points).toFixed(2)} 积分)`,
+                      text: true,
+                      runsOutAt: new Date(soonest.ms).toISOString(),
+                    },
+                  ]
+                : []),
             ],
             user: auth.name || auth.accountId || "DuMate",
             signIn: "kept",
