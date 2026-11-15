@@ -91,8 +91,12 @@ try {
   const w = u.windows[0]
   if (Math.abs(w.used - 100 / 6000 * 100) > 0.01) throw new Error("used 百分比错: " + w.used)
   if (!w.runsOutAt || w.runsOut !== 5000) throw new Error("runsOut 计算: " + JSON.stringify(w.runsOut))
+  const expWin = u.windows[1]
+  if (!expWin || expWin.name !== "最近到期" || !expWin.text || !/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(expWin.display)) {
+    throw new Error("最近到期窗口异常: " + JSON.stringify(expWin))
+  }
   if (u.plan !== "已签到 5 天") throw new Error("plan: " + u.plan)
-  ok(`used=${w.used.toFixed(2)}%, runsOut=5000（expired 包被正确忽略）, plan 正确`)
+  ok(`used=${w.used.toFixed(2)}%, runsOut=5000（expired 包被正确忽略）, 最近到期=${expWin.display}, plan 正确`)
 } catch (e) { fail("windows 计算", e) }
 
 console.log("[W4] usage 中 expireDate 为字符串数字（真实接口形态）已处理")
@@ -111,6 +115,7 @@ try {
   if (u.error) throw new Error(u.error)
   const w = u.windows[0]
   if (w.runsOutAt !== undefined) throw new Error("expireDate=null 应无 runsOut 字段: " + w.runsOutAt)
+  if (u.windows.length !== 1) throw new Error("expireDate=null 不应产生最近到期窗口: " + JSON.stringify(u.windows))
   ok("expireDate=null → 不产生 runsOut（无假数据）")
 } catch (e) { fail("null expireDate", e) }
 
