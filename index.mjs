@@ -32,7 +32,8 @@ import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { desktopUserDataDir } from "./paths.mjs"
 import { loadModels } from "./models.mjs"
-import { normalizeReasoningBody } from "./reasoning.mjs"
+import { applyReasoning, pickEffort } from "./reasoning.mjs"
+import { routeModel, applyBudget, loadCaps, saveCap, capsPath, learnCapFromBody } from "./budget.mjs"
 
 const PROVIDER_ID = "dumate"
 const PROVIDER_NAME = "百度搭子 DuMate"
@@ -464,6 +465,21 @@ export const DuMatePlugin = async (input = {}) => {
           }
         }
         const cookies = auth.cookies
+        // v0.5.0: identity headers the cloud gateway expects (dumate2api's web
+        // chain sends exactly these; without them some models 400 with
+        // "required headers invalid"). Real accountId when the auth record
+        // carries a sane one, "global" otherwise — never a caller-supplied value.
+        const accountId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(auth.accountId ?? ""))
+          ? String(auth.accountId)
+          : "global"
+        // Trusted model names for routing: the live/snapshot/default catalog
+        // plus the hardcoded fallbacks. Unknown names are rejected explicitly —
+        // silently rerouting a picked model would break model identity.
+        const trusted = new Set([
+          ...FALLBACK_MODELS.map((m) => m.id.toLowerCase()),
+          ...Object.keys(loadModels({ stateDir: input.directory })).map((id) => id.toLowerCase()),
+        ])
+        const capsFile = capsPath({ stateDir: input.directory })
         return {
           baseURL: GATEWAY_BASE,
           apiKey: "dumate",
@@ -484,15 +500,42 @@ export const DuMatePlugin = async (input = {}) => {
                 { status: 400, headers: { "Content-Type": "application/json" } },
               )
             }
-            // magpie conveys the reasoning level a user picked as this header
-            // (the host does not rewrite the body). Consume it as the fallback
-            // for normalizeReasoningBody and strip it — magpie-only headers
-            // must never travel to the upstream.
+            // magpie-only headers (X-Magpie-*) must never travel upstream; the
+            // effort header is consumed into the body below, the rest are dropped.
             const inbound = new Headers(init?.headers ?? req?.headers ?? {})
             const headerEffort = inbound.get("x-magpie-effort") ?? ""
+            for (const h of [...inbound.keys()]) {
+              if (h.startsWith("x-magpie-")) inbound.delete(h)
+            }
             let bodyText = init?.body
             if (bodyText === undefined && req) bodyText = await req.clone().text()
-            bodyText = normalizeReasoningBody(bodyText, headerEffort)
+            // Unified request transform: parse ONCE, then route → reasoning →
+            // budget, then serialize ONCE. Anything that is not a JSON object
+            // travels byte-for-byte unchanged.
+            let outboundModel = ""
+            let routeNote = null
+            try {
+              const parsed = JSON.parse(bodyText)
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                const routed = routeModel(parsed.model, trusted)
+                if (!routed) {
+                  return new Response(
+                    JSON.stringify({ error: { message: `未知模型 ${String(parsed.model).slice(0, 80)}：不在当前 DuMate 可信模型清单内，已拒绝调用（不做静默改写）`, type: "invalid_request_error" } }),
+                    { status: 400, headers: { "Content-Type": "application/json" } },
+                  )
+                }
+                outboundModel = routed.outbound
+                if (routed.note && String(parsed.model).toLowerCase() !== routed.outbound) {
+                  routeNote = `${parsed.model}=>${routed.outbound}`
+                }
+                parsed.model = routed.outbound
+                applyReasoning(parsed, pickEffort(parsed, headerEffort))
+                applyBudget(parsed, { env: process.env, caps: loadCaps(capsFile) })
+                bodyText = JSON.stringify(parsed)
+              }
+            } catch {
+              // bodyText is not JSON (or not readable as one) — passthrough.
+            }
             let cred
             try {
               cred = await fetchGatewayToken(cookieHeaderOf(cookies))
@@ -504,9 +547,10 @@ export const DuMatePlugin = async (input = {}) => {
               )
             }
             const headers = inbound
-            headers.delete("x-magpie-effort")
             headers.set("Authorization", `Bearer ${cred.token}`)
             headers.set("Content-Type", "application/json")
+            headers.set("X-Dumate-Client-Type", "web")
+            headers.set("X-Dumate-Account-Id", accountId)
             headers.delete("x-api-key")
             headers.delete("content-length")
             const res = await fetch(req ? req.url : input, {
@@ -525,6 +569,34 @@ export const DuMatePlugin = async (input = {}) => {
                 JSON.stringify({ error: { message: "DuMate gateway token 已失效并清除缓存，请重试或重新登录", type: "authentication_error" } }),
                 { status: 401, headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" } },
               )
+            }
+            // 400 with a max_tokens range error → learn the cap for the
+            // outbound model and record it (bounded read, atomic write; a
+            // failed write must never affect the response the caller gets).
+            if (res.status === 400 && outboundModel) {
+              try {
+                const text = await res.text()
+                const cap = learnCapFromBody(text)
+                if (cap) {
+                  try { saveCap(capsFile, outboundModel, cap, Date.now()) } catch {
+                    // Read-only store or transient FS failure — degrade silently.
+                  }
+                }
+                return new Response(text, { status: 400, statusText: res.statusText, headers: res.headers })
+              } catch {
+                // Body unreadable — fall through with the original response.
+              }
+            }
+            if (routeNote) {
+              // Tag the response without buffering it: streaming bodies pass
+              // through as a stream, only the header set is amended.
+              try {
+                const echoed = new Headers(res.headers)
+                echoed.set("X-Magpie-Dumate-Route", routeNote)
+                return new Response(res.body, { status: res.status, statusText: res.statusText, headers: echoed })
+              } catch {
+                return res
+              }
             }
             return res
           },

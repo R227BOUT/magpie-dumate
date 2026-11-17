@@ -48,6 +48,10 @@ OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan �
 - **模型调用**：`https://dumate-svc.baidu.com/gateway/apis/v1/chat/completions`（OpenAI 兼容），
   凭据链路 = Cookie → `/api/dumate/app/token/get` 换 gateway token → `Authorization: Bearer`。
   token 自动缓存与续期（服务端有效期约 14 小时，插件每小时主动刷新）。
+- **请求变换（0.5.0）**：补云端网关要求的身份头（`X-Dumate-Client-Type: web` +
+  `X-Dumate-Account-Id`，取自当前登录态，缺失回落 `global`）；模型名路由
+  （`[1M]` 后缀剥离、`glm-5→glm-53` 版本替代带诊断头、未知模型显式拒绝）；
+  `max_tokens` 预算钳制与 400 上限自学习（见「预算钳制与模型路由」）。
 - **每日签到**：magpie `checkin` hook，自动领取每日登录积分（数额以接口差额实时计算，Settings → Usage → Plugins 开关）。
 - **余额展示**：magpie `usage` hook，在 Usage 页显示剩余/总积分、最近到期积分包。
 - **三种登录方式**：
@@ -174,8 +178,8 @@ nothing is installed"），所以以后改 `index.mjs` 只要重载就生效，�
 ## 测试
 
 ```bash
-node run-tests.mjs --quick   # 21 个离线套件，不联网不耗积分（约 2 分钟）
-node run-tests.mjs           # 全部 33 套件（真实调用网关，消耗少量积分）
+node run-tests.mjs --quick   # 23 个离线套件，不联网不耗积分（约 2 分钟）
+node run-tests.mjs           # 全部 35 套件（真实调用网关，消耗少量积分）
 node run-tests.mjs test-smoke test-stress   # 只跑指定套件
 node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（秒级）
 ```
@@ -208,6 +212,8 @@ node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（
 | test-security | 凭据生命周期 / 域名白名单 / 泄漏面 |
 | test-sse-robustness | SSE 变体：CRLF / 大 chunk / 截断 / 错误体 |
 | test-docs-audit | README 与 runner/模型/bug 记录的一致性自检 |
+| test-request-transform | 0.5.0 请求变换：身份头注入/防伪造/模型路由/未知拒绝/[1M]（全离线 mock） |
+| test-budget-clamp | 0.5.0 预算钳制：floor/cap 矩阵/策略开关/400 上限学习/缓存卫生（全离线 mock） |
 | test-smoke | 全链路冒烟 |
 | test-stream-tools | SSE / tool_calls / 大 payload / 错误格式 |
 | test-concurrency | 并发 / 坏凭据 401 / 缓存复用 |
@@ -282,6 +288,42 @@ magpie 宿主把你在界面里选的推理档位放在 `X-Magpie-Effort` 请求
 reasoning_tokens 方向是否稳定），然后只改 `reasoning.mjs` 的 `REASONING` 表——
 白名单是单一事实源，`models.mjs` 从它导入，C19 哨兵防止再出现第二份副本。
 
+### 预算钳制与模型路由（0.5.0）
+
+三项能力移植自 dumate2api（wearetheone777/dumate2api）的实测结论，按本插件的定位裁剪：
+
+**身份头**：云端网关要求 `X-Dumate-Client-Type: web` 与 `X-Dumate-Account-Id` 两个身份头
+（dumate2api 的网页凭证链路只发这三个身份字段）。插件按当前登录态注入，调用方伪造的同名头
+一律被覆盖；accountId 缺失或形态非法时回落 `global`，绝不跨账号复用。
+0.4.0 验收中 `qwen4-max` 的 400 `required headers invalid` 是「缺头」假设——0.5.0 补头后
+以 live 验收结果为准，不预设必然修复。
+
+**模型名路由**（同一请求只解析/序列化一次 JSON）：
+
+| 入站模型 | 行为 |
+|---|---|
+| 可信清单内的名字（真实清单 ∪ 快照 ∪ 参考清单 ∪ 回退表） | 原样直通 |
+| `glm-53[1M]` 这类带 `[1M]` 后缀的 | 只剥后缀；`[1M]` 是命名标记，不据此宣称 1M 上下文 |
+| `glm-5` | 映射为 `glm-53`——**版本替代，不是同一模型**（桌面链路的 glm-5 别名对应 GLM-5.2，云端路由由 GLM-5.3 档服务）；响应带 `X-Magpie-Dumate-Route: glm-5=>glm-53` 诊断头 |
+| 完全未知的模型 ID | **显式 400 拒绝**，绝不静默兜底成 `model-text`——用户选了 A 却跑 B 且 200，比明确失败更难发现 |
+
+**max_tokens 预算钳制**：dumate2api 实测发现小预算下长推理任务会出现
+「思考耗尽预算、正文 0」。策略分层：
+
+- `floor` 抬升**只对 `deepseek-v41-flash` 启用**（65536 下限 / 缺省 32768 抬到 floor）；
+  其余模型维持既有显式预算行为（缺省不注入 `max_tokens`），只做保护性上限钳制。
+- 上限优先级：**学习值 > 已验证静态上限 > 未知默认（131072）**。静态表来自
+  dumate2api 实测（`model-text`/`text.L0`/`mm.L0`/`mm.L2` = 393216；
+  `text.L1` = 2000000——**实测可接受值，不是已探明硬上限**）。
+- `cap < floor` 时以 cap 为准：绝不为凑下限越过上游限制。
+- 环境变量 `MAGPIE_DUMATE_BUDGET=off` 整体关闭抬升（原始透传退出路径）。
+
+**上限自学习**：官方网关 400 且错误体是 max_tokens 范围类错误时，解析真实上限
+（qianfan `[1, N]` / GLM 中文「超过 N」/ `Range of max_tokens` 三种格式），按
+归一后模型键原子写入 `~/.config/magpie/magpie-dumate/caps.json`（0600，目录 0700，
+TTL 7 天，损坏自愈，分析窗有界 8KB）。只学习不重试：本版本撞到 400 后记录上限、
+透传错误，下一次请求自动受益。写盘失败静默降级，绝不影响本次响应。
+
 配置文件里的 `127.0.0.1` 是 DuMate 内置 OpenCode 的本地代理，不是卸载后还能用的云端 API。
 本插件只请求 `dumate-svc.baidu.com` 的官方 chat 端点，拒绝其他地址与重定向。
 快照只解决「模型清单还在」，**不延长登录有效期**：本次只离线验证了源文件缺失时清单仍能加载，
@@ -292,10 +334,11 @@ reasoning_tokens 方向是否稳定），然后只改 `reasoning.mjs` 的 `REASO
 - Cookie 明文包含 BDUSS/STOKEN 等百度账号凭据，等同意志级凭据：插件只在内存中使用，
   持久化由 magpie `plugin-auth.json` 统一管理（与所有官方插件一致）。
 - 桌面端登录态为**只读复用**，绝不写 DuMate 数据目录任何文件。
-- 0.3.0 起插件会写**一个**文件：magpie 自己配置目录下的
-  `magpie-dumate/models.snapshot.json`（权限 0600）。里面只有模型元数据，
-  不含 Cookie、token、apiKey、源文件路径或任何 endpoint。`index.mjs` 依然零写文件调用，
-  「插件只读 DuMate 登录态」的承诺不变。
+- 0.3.0 起插件写**两个**文件，都在 magpie 自己配置目录的 `magpie-dumate/` 下：
+  `models.snapshot.json`（模型元数据快照，0600）与 0.5.0 新增的 `caps.json`
+  （模型输出上限缓存，0600，目录 0700）。两者都只有元数据——不含 Cookie、token、
+  apiKey、prompt 或任何 endpoint；`index.mjs` 依然零写文件调用，全部写盘收敛在
+  `budget.mjs`/`models.mjs`，「插件只读 DuMate 登录态」的承诺不变。
 - 三个出站请求（token/积分 ×2 + 聊天）都用 `redirect: "manual"`：绝不带 Cookie / gateway token
   跟随重定向，同时保留 3xx 响应并判为登录失效。直接用 `redirect: "error"` 会让坏凭据
   退化成普通 502、丢掉 `signIn=expired`——这个回归是本次全量测试抓到后修掉的。
@@ -315,6 +358,23 @@ reasoning_tokens 方向是否稳定），然后只改 `reasoning.mjs` 的 `REASO
 | `dumate-svc.baidu.com/gateway/apis/v1/chat/completions` | POST | 模型调用（消耗积分） |
 
 ## 变更记录
+
+### 0.5.0（2026-11-17 请求变换三件套：身份头 / 预算钳制 / 模型路由与上限学习）
+
+三项能力移植自 [dumate2api](https://github.com/wearetheone777/dumate2api) 的实测结论，
+全部收敛在 `budget.mjs` + loader 的统一请求变换（单次 JSON 解析/序列化）：
+
+- **身份头**：补云端网关要求的 `X-Dumate-Client-Type: web` + `X-Dumate-Account-Id`
+  （真实 accountId，缺失回落 `global`；调用方伪造的同名头被覆盖）。0.4.0 验收里
+  `qwen4-max` 的 400 `required headers invalid` 是缺头假设，修复与否以 live 验收为准。
+- **模型名路由**：可信清单直通；`[1M]` 只剥后缀；`glm-5→glm-53` 版本替代映射带
+  `X-Magpie-Dumate-Route` 诊断头；未知模型显式 400 拒绝（不静默兜底）。
+- **max_tokens 预算**：floor 抬升仅 `deepseek-v41-flash`（65536，实测思考耗尽预算的
+  模型）；其余模型维持既有行为只做保护性钳制；`MAGPIE_DUMATE_BUDGET=off` 可关。
+- **上限自学习**：官方 400 的 max_tokens 范围错误 → 解析真实上限 → 归一模型键原子落盘
+  `caps.json`（0600/0700，TTL 7 天，损坏自愈，8KB 有界分析）；只学习不自动重试。
+- 约束不变：推理白名单维持 `deepseek-v41-flash` 一家（0.4.0 的 live 证据仍有效）；
+  Cookie→gateway token 链路零改动；`index.mjs` 保持零写文件。
 
 ### 0.4.0（2026-11-17 修复档位头从未被消费 + 用真实网关证据收紧推理白名单）
 

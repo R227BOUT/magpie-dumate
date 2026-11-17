@@ -36,6 +36,31 @@ const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "m
 
 const clean = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "")
 
+// 0.5.0: the object-level helpers are exported so the loader's unified request
+// transform (budget.mjs era) can parse once, then apply routing → reasoning →
+// budget → serialize once. normalizeReasoningBody keeps its exact v0.4.0
+// string-in/string-out behaviour on top of them.
+export function pickEffort(request, headerEffort) {
+  if (!request || typeof request !== "object") return ""
+  const own = clean(request.reasoning_effort)
+  return EFFORTS.has(own) ? own : EFFORTS.has(clean(headerEffort)) ? clean(headerEffort) : ""
+}
+
+// DuMate's deepseek only has thinking on/off; "low" and "high" resolve to the
+// same upstream strength (live: both think, none really turns it off). Every
+// non-none level folds to "high"; max is passed through as itself.
+export function applyReasoning(request, effort) {
+  if (!request || typeof request !== "object" || !effort) return request
+  if (!Object.hasOwn(REASONING, request.model)) return request
+  const enabled = effort !== "none"
+  if (!enabled) delete request.reasoning_effort
+  else request.reasoning_effort = effort === "max" ? "max" : "high"
+  // An explicit effort wins over conflicting switches left by an SDK/variant.
+  request.thinking = { ...request.thinking, type: enabled ? "enabled" : "disabled" }
+  request.enable_thinking = enabled
+  return request
+}
+
 export function normalizeReasoningBody(body, headerEffort) {
   let text
   if (typeof body === "string") text = body
@@ -45,18 +70,8 @@ export function normalizeReasoningBody(body, headerEffort) {
   try { request = JSON.parse(text) } catch { return body }
   if (!request || typeof request !== "object" || !Object.hasOwn(REASONING, request.model)) return body
 
-  const own = clean(request.reasoning_effort)
-  const effort = EFFORTS.has(own) ? own : EFFORTS.has(clean(headerEffort)) ? clean(headerEffort) : ""
+  const effort = pickEffort(request, headerEffort)
   if (!effort) return body
 
-  // DuMate's deepseek only has thinking on/off; "low" and "high" resolve to the
-  // same upstream strength (live: both think, none really turns it off). Every
-  // non-none level folds to "high"; max is passed through as itself.
-  const enabled = effort !== "none"
-  if (!enabled) delete request.reasoning_effort
-  else request.reasoning_effort = effort === "max" ? "max" : "high"
-  // An explicit effort wins over conflicting switches left by an SDK/variant.
-  request.thinking = { ...request.thinking, type: enabled ? "enabled" : "disabled" }
-  request.enable_thinking = enabled
-  return JSON.stringify(request)
+  return JSON.stringify(applyReasoning(request, effort))
 }
