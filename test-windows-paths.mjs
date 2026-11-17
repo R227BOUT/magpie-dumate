@@ -29,8 +29,17 @@ const origAppData = process.env.APPDATA
 const sandbox = join(tmpdir(), "dumate-win-matrix")
 rmSync(sandbox, { recursive: true, force: true })
 
+// W1-W4 断言的是 Windows 专属语义：desktopUserDataDir 只在 win32 上读 APPDATA，
+// `\` 也只在 win32 是路径分隔符。在 macOS / Linux 上这些前提不成立——APPDATA 与
+// 路径发现完全无关（darwin 走 ~/Library/Application Support，linux 走 XDG），
+// 硬跑只会得到环境差异的假失败/假通过（0.4.0 前 W1/W2 在装了 DuMate 的 Mac 上
+// 靠真实登录态"碰巧通过"，W3/W4 直接失败）。非 Windows 平台如实 SKIP。
+const IS_WIN = process.platform === "win32"
+
 console.log("[W1] APPDATA 含空格的路径")
-try {
+if (!IS_WIN) {
+  console.log("  SKIP 非 Windows：desktopUserDataDir 不读 APPDATA，本用例不适用")
+} else try {
   const p = join(sandbox, "App Data With Spaces", "qianfan-desktop-app")
   makeAuthFiles(p)
   process.env.APPDATA = join(sandbox, "App Data With Spaces")
@@ -40,7 +49,9 @@ try {
 } catch (e) { fail("空格路径", e) }
 
 console.log("[W2] APPDATA 含中文的路径")
-try {
+if (!IS_WIN) {
+  console.log("  SKIP 非 Windows：desktopUserDataDir 不读 APPDATA，本用例不适用")
+} else try {
   const p = join(sandbox, "中文目录测试", "qianfan-desktop-app")
   makeAuthFiles(p)
   process.env.APPDATA = join(sandbox, "中文目录测试")
@@ -50,7 +61,9 @@ try {
 } catch (e) { fail("中文路径", e) }
 
 console.log("[W3] APPDATA 未设置（undefined）→ 走空字符串 join 不崩")
-try {
+if (!IS_WIN) {
+  console.log("  SKIP 非 Windows：APPDATA 缺失不影响 darwin/linux 路径推导，语义不同")
+} else try {
   delete process.env.APPDATA
   const r = readDesktopLogin()
   // join("", "qianfan-desktop-app") = 相对路径 → statSync 失败 → null
@@ -59,7 +72,9 @@ try {
 } catch (e) { fail("APPDATA 缺失", e) }
 
 console.log("[W4] DUMATE_USER_DATA_DIR 用 Windows 反斜杠路径")
-try {
+if (!IS_WIN) {
+  console.log("  SKIP 非 Windows：`\\` 不是路径分隔符，反斜杠路径语义不适用")
+} else try {
   const p = join(sandbox, "backslash-dir", "qianfan-desktop-app")
   makeAuthFiles(p)
   process.env.DUMATE_USER_DATA_DIR = p.replace(/\//g, "\\")

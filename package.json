@@ -1,6 +1,6 @@
 {
   "name": "magpie-dumate",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Baidu DuMate (百度搭子) personal points as a Magpie provider: cross-platform desktop sign-in, real model catalog, daily check-in, balance display",
   "type": "module",
   "main": "./index.mjs",

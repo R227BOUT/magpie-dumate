@@ -198,10 +198,10 @@ node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（
 | test-checkin-branches | checkin 五分支（fetch mock） |
 | test-desktop-paths | 桌面登录路径矩阵 + auth.json 容错 |
 | test-macos-paths | 三平台路径 / 覆盖优先级 / 激活账号定位 / 目录注入防护 |
-| test-model-catalog | 模型元数据隔离 / 别名去重 / 快照回退 / V4.1 推理档位 |
+| test-model-catalog | 模型元数据隔离 / 别名去重 / 快照回退 / 推理白名单与档位矩阵（含头部档位） |
 | test-token-lifecycle | token 单飞 / 刷新边界 / 异常形态 |
 | test-delivery-review | 交付链审查（指引/文档/报错/路径） |
-| test-edge-cases | 401 自愈 / windows 计算 / null 字段 |
+| test-edge-cases | 401 自愈 / windows 计算 / null 字段 / X-Magpie-Effort 头消费 |
 | test-bug-regression | 已修 bug 的回归哨兵（6 个专杀用例） |
 | test-determinism | 跨套件确定性（两轮签名比对） |
 | test-upgrade-compat | 旧 seat / 脏 cookie / getAuth 抛错防御 |
@@ -255,9 +255,32 @@ node run-tests.mjs --quick test-unit test-static   # 只跑指定离线套件（
 包内 `models.default.json` 是 RanceLee 在 2026-11-13 分享的参考清单（`asOf` 带日期），
 **只在源文件与快照都不可用时使用**，既不是本机实测，也不承诺账号能调用其中每个模型。
 
-V4.1 的推理档位统一为 `none / low / high / max`，插件只对 `deepseek-v41-flash` 映射：
-`none` 显式关闭思考、`low` 归一为 `high`（百度侧两者本来同强度）、`high / max` 保留并开启。
-四档只是为了切换供应商时不丢选择，**不代表上游有四种不同的计算预算**。
+### 推理档位（0.4.0）
+
+magpie 宿主把你在界面里选的推理档位放在 `X-Magpie-Effort` 请求头里传给插件
+（宿主不改写请求正文），插件把它注入发给 DuMate 网关的正文；正文里显式的
+`reasoning_effort` 优先于头部档位。
+
+**只有 `deepseek-v41-flash` 声明档位。** 这是 2026-11-17 对本机真实网关逐模型
+对照实测（同一 prompt，比 reasoning_tokens）后收紧的结果，其他模型的证据如下：
+
+| 模型 | 实测（原值 vs 带档位） | 结论 |
+|---|---|---|
+| `deepseek-v41-flash` | 默认 rt=99；`none`→rt=0（真关思考）；`high`→72；`max`→103 | ✅ 语义成立，保留四档 `none/low/high/max`（low 与 high 上游同强度，归一到 high） |
+| `glm-53` | 默认 rt=276；带任何 `reasoning_effort`→**rt=0** | ❌ 参数等于"关思考"，声明 high 会让人开关一开反而想得更少——不声明 |
+| `model-text` | plain 48 / low 52 / high 72 | ❌ 差异落在生成长度噪声内，方向不稳定 |
+| `dm-auto-model/text.L0` | plain 58 / low 55 / high **47** | ❌ 高档反而更低 |
+| `kimi-k3` | 首测 low 140 / high 241；复测 low **461** / high 305 | ❌ 方向反转，是噪声不是档位 |
+| `deepseek-v4-pro` | 三次重复：low [117,83] / high [97,79] | ❌ 高档 ≤ 低档，无分级证据 |
+| `qwen4-max` | 连**不带任何额外参数**的请求都返回 400 `required headers invalid` | ❌ 上游有本插件不满足的必需头，与档位无关 |
+
+因此：`glm-53`、`model-text`、`dm-auto-model/text.L0`、`kimi-k3`、`qwen4-max`、
+`deepseek-v4-pro` 一律**不声明档位**，请求一个字节都不改写。它们的默认思考行为
+（glm-53 / model-text 等默认就在思考）不受影响——保持默认反而是最优。
+
+后续要晋升某个模型，按同一方法补证据（同 prompt 各档位 ≥3 次重复、看
+reasoning_tokens 方向是否稳定），然后只改 `reasoning.mjs` 的 `REASONING` 表——
+白名单是单一事实源，`models.mjs` 从它导入，C19 哨兵防止再出现第二份副本。
 
 配置文件里的 `127.0.0.1` 是 DuMate 内置 OpenCode 的本地代理，不是卸载后还能用的云端 API。
 本插件只请求 `dumate-svc.baidu.com` 的官方 chat 端点，拒绝其他地址与重定向。
@@ -292,6 +315,40 @@ V4.1 的推理档位统一为 `none / low / high / max`，插件只对 `deepseek
 | `dumate-svc.baidu.com/gateway/apis/v1/chat/completions` | POST | 模型调用（消耗积分） |
 
 ## 变更记录
+
+### 0.4.0（2026-11-17 修复档位头从未被消费 + 用真实网关证据收紧推理白名单）
+
+0.3.0 只让 `deepseek-v41-flash` 有推理档位，而且 magpie 宿主根本不通过正文传档位——
+宿主把用户选的档位放在 `X-Magpie-Effort` 请求头里交给插件（正文不改写），0.3.0 从不读
+这个头，等于界面选了也不生效。
+
+- 🔴 **档位头从未被消费**：`auth.loader` 的 `fetch` 现在读取 `x-magpie-effort`
+  （大小写不敏感）作为正文档位的兜底；正文显式 `reasoning_effort` 优先；消费后立即
+  从头里删除，不外发。
+- **白名单经过实测收紧到 1 个模型**：最初按历史会话的间接证据把 `glm-53` /
+  `model-text` / `dm-auto-model/text.L0` 也加了档位，随后在 2026-11-17 用**真实网关**
+  逐模型对照实测（同一 prompt、看 reasoning_tokens），全部被证据否决——最典型的是
+  `glm-53`：默认 rt=276，带任何 `reasoning_effort` 反而 rt=0，声明档位会让用户
+  越选越少思考。`kimi-k3` 首测 low<high 复测 low>high、`deepseek-v4-pro` 高档 ≤ 低档、
+  `qwen4-max` 裸请求即 400，都不是可用档位。最终**只有 `deepseek-v41-flash` 保留
+  四档**（实测 `none`→rt=0、`high`→72、`max`→103，语义成立）。完整证据表见
+  「推理档位」章节。这是「没测到不许写成通过」纪律的一次实际执行：宁可只留一个
+  验证过的模型，也不给用户一个看着可选、实际无效甚至相反的开关。
+- **注册表字段不可信**：云端给全部 44 个条目下发 `thinking: {mode: "never"}`
+  （glm-53 默认就在思考，实测为证），`importModels` 的白名单优先于这些字段。
+- **回退表不声明档位**：`config` hook 的两个 fallback 入口（model-text / text.L0）
+  不暴露死档位——同样的实测结论，UI 上不该出现选了也没用的选项。
+- **checkin 补 `until`**：`done / claimed / inactive` 返回北京时间次日零点（RFC 3339），
+  宿主据此排程下一次询问（上游 hook 契约字段，0.3.0 未返回）。
+- **测试平台化**：`test-windows-paths` 的 W1-W4 断言 Windows 专属语义（APPDATA 参与
+  路径推导、`\` 分隔符），非 Windows 平台如实 SKIP——修掉 W1/W2 在装了 DuMate 的
+  Mac 上靠真实登录态「碰巧通过」的假阳性与 W3/W4 的假失败。
+- 新增 10 个离线用例：模型清单 6（C13-C18）、loader 头消费 2（W5/W6）、checkin 2
+  （K8/K9）；全部不联网不耗积分。C13/C17 是白名单漂移的双向哨兵。
+- **收尾（代码审查 CR-001/CR-002）**：白名单改为单一事实源——`reasoning.mjs` 导出
+  `REASONING` 表，`models.mjs` 导入使用，C19 结构性哨兵禁止再定义第二份副本
+  （原先两处各写一份，加模型时漏改一边会静默失效）；`tools/check-secrets.mjs`
+  的自指豁免改为匹配实际存在的路径标签（原比较的标签从未被任何模式产出，是死守卫）。
 
 ### 0.3.0（2026-11-13 修复 macOS 登录识别 + 导入真实模型清单）
 

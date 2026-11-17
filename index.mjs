@@ -21,6 +21,11 @@
 // V4.1 reasoning controls were fixed after RanceLee (公众号 HelloRanceLee)
 // reported the macOS sign-in failure and proposed the solution on 2026-11-13.
 // See README.md -> 致谢.
+// 0.4.0: magpie hands the picked reasoning level to the plugin as the
+// X-Magpie-Effort header; the loader now consumes it into the request body
+// (magpie never rewrites the body), which fixes deepseek-v41-flash's levels
+// never reaching DuMate. Live probes the same day showed no other model honours
+// graded effort, so only that one model advertises levels. See README -> 推理档位.
 
 import { createDecipheriv } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
@@ -45,6 +50,10 @@ const TOKEN_TTL_MS = 60 * 60 * 1000 // refresh token hourly; server gives ~14h
 // auto-routing alias the desktop app itself uses; the gateway resolves it to
 // live upstreams (observed 2026-10-26: responses always echo "model-text" —
 // the router hides upstream identity; id prefix is "gd-").
+// No reasoning levels here: 2026-11-17 live probes showed both router entries
+// fluctuate inside generation noise when given reasoning_effort, so offering
+// levels would be theatre. deepseek-v41-flash (the verified one) comes from
+// models.mjs / models.default.json.
 const FALLBACK_MODELS = [
   { id: "model-text", name: "DuMate Auto (智能路由)", context: 192_000, output: 128_000, reasoning: true },
   { id: "dm-auto-model/text.L0", name: "DuMate Auto L0", context: 192_000, output: 128_000, reasoning: true },
@@ -230,6 +239,15 @@ const cardText = (value, max = 200) => {
 // A hook cut short answers failed, which the host retries in half an hour.
 const CHECKIN_BUDGET_MS = 25 * 1000
 
+// The next 00:00 Asia/Shanghai as RFC 3339 UTC — when the vendor's check-in
+// day flips. China has no DST, so a fixed +08:00 offset is exact. Returned as
+// `until` so the host schedules its next ask instead of polling.
+function beijingDayTurn(now = new Date()) {
+  const shifted = new Date(now.getTime() + 8 * 60 * 60 * 1000)
+  const nextZero = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate() + 1)
+  return new Date(nextZero - 8 * 60 * 60 * 1000).toISOString()
+}
+
 // ---- Console API (GET works with plain cookie header) ----------------------
 
 // Baidu's console redirects expired sessions to an HTML login page with HTTP
@@ -370,6 +388,7 @@ export const DuMatePlugin = async (input = {}) => {
                 limit: { context: m.context, output: m.output },
                 tool_call: true,
                 reasoning: !!m.reasoning,
+                ...(m.variants ? { variants: m.variants } : {}),
                 attachment: false,
                 modalities: { input: ["text"], output: ["text"] },
               },
@@ -465,9 +484,15 @@ export const DuMatePlugin = async (input = {}) => {
                 { status: 400, headers: { "Content-Type": "application/json" } },
               )
             }
+            // magpie conveys the reasoning level a user picked as this header
+            // (the host does not rewrite the body). Consume it as the fallback
+            // for normalizeReasoningBody and strip it — magpie-only headers
+            // must never travel to the upstream.
+            const inbound = new Headers(init?.headers ?? req?.headers ?? {})
+            const headerEffort = inbound.get("x-magpie-effort") ?? ""
             let bodyText = init?.body
             if (bodyText === undefined && req) bodyText = await req.clone().text()
-            bodyText = normalizeReasoningBody(bodyText)
+            bodyText = normalizeReasoningBody(bodyText, headerEffort)
             let cred
             try {
               cred = await fetchGatewayToken(cookieHeaderOf(cookies))
@@ -478,7 +503,8 @@ export const DuMatePlugin = async (input = {}) => {
                 { status: expired ? 401 : 502, headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": expired ? "expired" : "kept" } },
               )
             }
-            const headers = new Headers(init?.headers ?? req?.headers)
+            const headers = inbound
+            headers.delete("x-magpie-effort")
             headers.set("Authorization", `Bearer ${cred.token}`)
             headers.set("Content-Type", "application/json")
             headers.delete("x-api-key")
@@ -610,6 +636,7 @@ export const DuMatePlugin = async (input = {}) => {
           if (before?.hasIssued === true) {
             return {
               outcome: "done",
+              until: beijingDayTurn(),
               message: `今日已签到（累计 ${cardText(before.totalTimes) || "?"} 天）`,
             }
           }
@@ -629,13 +656,18 @@ export const DuMatePlugin = async (input = {}) => {
             return {
               outcome: "claimed",
               ...(delta ? { credit: delta } : {}),
+              until: beijingDayTurn(),
               message: `签到成功${delta ? ` +${delta} 积分` : ""}（累计 ${cardText(after.totalTimes) || "?"} 天）`,
             }
           }
           // The POST went through but the ledger shows nothing yet. Saying
           // "claimed" would be a claim we cannot back; `inactive` is the honest
           // outcome, and the host re-asks later in the day.
-          return { outcome: "inactive", message: "签到请求已提交，但今日积分尚未到账（可能延迟，稍后自动重试）" }
+          return {
+            outcome: "inactive",
+            until: beijingDayTurn(),
+            message: "签到请求已提交，但今日积分尚未到账（可能延迟，稍后自动重试）",
+          }
         } catch (e) {
           return {
             outcome: "failed",
@@ -764,4 +796,5 @@ export const _internal = {
   iconFromPluginDir,
   iconFromDesktopApp,
   iconFromBundle,
+  beijingDayTurn,
 }
