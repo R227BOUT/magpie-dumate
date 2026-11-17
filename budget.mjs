@@ -34,64 +34,51 @@ export const DEFAULT_BUDGET = 32768
 export const CAPS_TTL_MS = 7 * 24 * 3600e3
 // 400 错误体的分析窗（有界读取承诺：窗外的匹配不学习）。
 export const LEARN_SLICE = 8192
-// 学习读取的总量上界：无论声明与否，实际读取超过此值即放弃学习。
+// 学习读取的总量上界：无论声明与否，实际经过的字节超过此值即放弃学习。
 export const LEARN_READ_CAP = 65536
 
-// 有界探测（GPT-REVIEW-V050-R2 任务一）：从响应体流**按实际字节计数**读取，
-// 至多 cap 字节。Content-Length 缺失、虚假偏小、分块传输都不影响本保证——
-// 计数永远基于实际收到的字节。
-//
-// 返回 { text, overflow, body }：
-//   - 未超限（body 已完整读入，≤cap）：text = 完整正文，body = null。
-//   - 超限：overflow = true，text = ""（不用于学习），body = 重组的可读流——
-//     已缓冲的头部分块 + 惰性续读的余量，调用方拿到的字节与原始响应完全一致
-//     且无需整段入内存。
-// 注意：不用 res.clone()——undici 的 tee 在取消一支分支时会卡住另一支的
-// 背压（实测 T14 挂起），直接消费原流再重组是可靠且同样有界的方案。
-export async function readBoundedHead(res, cap = LEARN_READ_CAP) {
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  const head = []
-  let bytes = 0
+// 400 上限学习的流式旁路观察（GPT-REVIEW-V050-R3 最终方案）：
+// 原始分块经 TransformStream **零改动直通下游**（无复制、无暂存、无重编码——
+// 非法 UTF-8 也逐字节保真）；旁路只缓存前 LEARN_SLICE 字节作为学习样本，并按
+// 实际字节数统计整个响应体，总量超过 LEARN_READ_CAP 即清空样本放弃学习。
+// 学习写入只发生在下游**完整消费**之后（transform 流的 flush；下游中途取消
+// 则 flush 不执行，本次学习自然放弃）。不使用 Response.clone()，无预读取阻塞，
+// 单个超大分块也不会为学习而入缓冲区（旁路最多切取 sampleCap 字节）。
+export function tapLearningStream(res, { onLearn, readCap = LEARN_READ_CAP, sampleCap = LEARN_SLICE } = {}) {
+  let sample = []
+  let sampleBytes = 0
+  let total = 0
   let overflow = false
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    bytes += value?.byteLength ?? 0
-    head.push(value)
-    if (bytes > cap) {
-      overflow = true
-      break
-    }
-  }
-  let text = null
-  if (!overflow) {
-    text = ""
-    for (const chunk of head) text += decoder.decode(chunk, { stream: true })
-    text += decoder.decode()
-  }
-  // 重组响应体流：头部分块先入队，余量从同一 reader 惰性续读。
-  const body = new ReadableStream({
-    start(controller) {
-      for (const chunk of head) controller.enqueue(chunk)
-      if (!overflow) controller.close()
+  return res.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      // 原始字节原样交给下游——学习侧永不改写响应。
+      controller.enqueue(chunk)
+      const size = chunk?.byteLength ?? 0
+      total += size
+      if (total > readCap) {
+        overflow = true
+        sample = []
+        sampleBytes = 0
+        return
+      }
+      if (sampleBytes < sampleCap) {
+        const room = sampleCap - sampleBytes
+        const slice = size <= room ? chunk : chunk.subarray(0, room)
+        sample.push(slice)
+        sampleBytes += slice.byteLength
+      }
     },
-    async pull(controller) {
+    flush() {
+      if (overflow || !sampleBytes || !onLearn) return
       try {
-        const { done, value } = await reader.read()
-        if (done) controller.close()
-        else controller.enqueue(value)
-      } catch (e) {
-        controller.error(e)
+        const text = new TextDecoder().decode(Buffer.concat(sample))
+        const cap = learnCapFromBody(text)
+        if (cap) onLearn(cap)
+      } catch {
+        // 样本损坏/解码失败——学习是非关键旁路，静默放弃。
       }
     },
-    cancel() {
-      try { reader.cancel() } catch {
-        // 流已结束或本就不可读——无碍。
-      }
-    },
-  })
-  return { text, overflow, body }
+  }))
 }
 
 // 已验证静态上限（dumate2api src/dumate-caps.js 的实测值）。

@@ -33,7 +33,7 @@ import { join } from "node:path"
 import { desktopUserDataDir } from "./paths.mjs"
 import { loadModels } from "./models.mjs"
 import { applyReasoning, pickEffort } from "./reasoning.mjs"
-import { routeModel, applyBudget, loadCaps, saveCap, capsPath, learnCapFromBody, readBoundedHead, LEARN_READ_CAP } from "./budget.mjs"
+import { routeModel, applyBudget, loadCaps, saveCap, capsPath, tapLearningStream, LEARN_READ_CAP } from "./budget.mjs"
 
 const PROVIDER_ID = "dumate"
 const PROVIDER_NAME = "百度搭子 DuMate"
@@ -610,39 +610,26 @@ export const DuMatePlugin = async (input = {}) => {
               )
             }
             // 400 with a max_tokens range error → learn the cap for the
-            // outbound model and record it. The read is truly bounded
-            // (GPT-REVIEW-V050-R2): byte-counted against the *actual* stream —
-            // Content-Length missing, lying, or chunked all end in the same
-            // guarantee: past LEARN_READ_CAP actual bytes learning is
-            // abandoned, and the caller receives a response body byte-identical
-            // to the original (buffered head + lazily streamed remainder).
+            // outbound model via a streaming side-channel (GPT-REVIEW-V050-R3):
+            // the body's original bytes pass through a TransformStream untouched
+            // (byte fidelity even for invalid UTF-8 and single multi-MB chunks —
+            // nothing is staged for learning beyond an 8 KiB sample), total
+            // bytes are counted and learning is abandoned past LEARN_READ_CAP,
+            // and the write happens only after the caller fully consumes the
+            // response. No clone(), no pre-read blocking, no decode→re-encode.
             if (res.status === 400 && outboundModel) {
               const declared = Number(res.headers.get("content-length") ?? "0")
-              const declaredOversize = Number.isFinite(declared) && declared > LEARN_READ_CAP
-              if (!declaredOversize) {
-                try {
-                  const { text, overflow, body } = await readBoundedHead(res, LEARN_READ_CAP)
-                  if (!overflow) {
-                    const cap = learnCapFromBody(text)
-                    if (cap) {
-                      try { saveCap(capsFile, outboundModel, cap, Date.now()) } catch {
-                        // Read-only store or transient FS failure — degrade silently.
-                      }
+              if (!(Number.isFinite(declared) && declared > LEARN_READ_CAP) && res.body) {
+                const headers = new Headers(res.headers)
+                headers.delete("content-length")
+                const body = tapLearningStream(res, {
+                  onLearn: (cap) => {
+                    try { saveCap(capsFile, outboundModel, cap, Date.now()) } catch {
+                      // Read-only store or transient FS failure — degrade silently.
                     }
-                  }
-                  // Hand the caller a response byte-identical to the upstream
-                  // one; content-length is dropped (undici recomputes it for
-                  // the buffered-text case and chunked transfer covers the
-                  // streamed case, so a stale declared value can never
-                  // truncate the caller's view).
-                  const headers = new Headers(res.headers)
-                  headers.delete("content-length")
-                  return new Response(overflow ? body : text, {
-                    status: 400, statusText: res.statusText, headers,
-                  })
-                } catch {
-                  // Probe failed (null body / stream error) — skip learning.
-                }
+                  },
+                })
+                return new Response(body, { status: 400, statusText: res.statusText, headers })
               }
               return res
             }

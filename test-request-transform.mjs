@@ -8,7 +8,7 @@
 //     映射必须留诊断；未知模型显式拒绝，绝不静默兜底成 model-text。
 // 全部离线（mock globalThis.fetch）。
 import { DuMatePlugin } from "./index.mjs"
-import { routeModel, capsPath } from "./budget.mjs"
+import { routeModel, capsPath, tapLearningStream } from "./budget.mjs"
 import { mkdirSync, rmSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -335,5 +335,132 @@ try {
   rmSync(dir, { recursive: true, force: true })
   ok("先注册→再删除→重新 config → 立即 400（不残留信任）")
 } catch (e) { fail("自定义模型生命周期", e) } finally { restore() }
+
+console.log("[T17] 超大单块：单个 12MB 分块的 400 体 → 不学习、下游逐字节收全（回归哨兵）")
+try {
+  const dir = join(tmpdir(), "dumate-transform-huge-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  // 单个 12MB 分块，匹配串在块首（若被学习即超标）
+  const prefix = new TextEncoder().encode("max_tokens range is [1, 4096]")
+  const chunk = new Uint8Array(12 * 1024 * 1024)
+  chunk.set(prefix, 0)
+  const source = new ReadableStream({
+    start(controller) { controller.enqueue(chunk); controller.close() },
+  })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-50", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      return new Response(source, { status: 400, headers: { "Content-Type": "application/json" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v41-flash", messages: [] }) })
+  if (r.status !== 400) throw new Error("HTTP " + r.status)
+  const received = new Uint8Array(await r.arrayBuffer())
+  if (received.length !== chunk.length) throw new Error(`下游收到 ${received.length} 字节 ≠ 原始 ${chunk.length}（12MB 单块被截断）`)
+  for (let i = 0; i < prefix.length; i++) {
+    if (received[i] !== prefix[i]) throw new Error("块首匹配串字节被改写")
+  }
+  if (existsSync(capsPath({ stateDir: dir }))) {
+    throw new Error("12MB 超限体被学习（总量计数失效）")
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("12MB 单块：不学习 + 下游逐字节收全（旁路采样不为学习暂存大块）")
+} catch (e) { fail("超大单块", e) } finally { restore() }
+
+console.log("[T18] 字节保真：非法 UTF-8 的短错误体逐字节透传（不得 decode→re-encode 改写）")
+try {
+  const dir = join(tmpdir(), "dumate-transform-utf8-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  // 9 字节、含非法 UTF-8 序列（0xFF 0xFE）——TextDecoder 会替换成 U+FFFD 再重编码变 11 字节
+  const raw = new Uint8Array([0x7b, 0x22, 0xff, 0xfe, 0x22, 0x3a, 0x31, 0xfd, 0x7d])
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-50", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      return new Response(raw, { status: 400, headers: { "Content-Type": "application/json" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v41-flash", messages: [] }) })
+  if (r.status !== 400) throw new Error("HTTP " + r.status)
+  const received = new Uint8Array(await r.arrayBuffer())
+  if (received.length !== raw.length) {
+    throw new Error(`字节保真被破坏：9 字节变成 ${received.length} 字节（decode→re-encode 复发，R3 反例 B）`)
+  }
+  for (let i = 0; i < raw.length; i++) {
+    if (received[i] !== raw[i]) throw new Error(`第 ${i} 字节被改写: ${raw[i]}→${received[i]}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("非法 UTF-8 短体逐字节保真（原始字节直通，零重编码）")
+} catch (e) { fail("字节保真", e) } finally { restore() }
+
+console.log("[T19] tapLearningStream 合约：旁路样本 ≤8KB、总量 >65536 放弃、完整消费才学习")
+try {
+  const dir = join(tmpdir(), "dumate-transform-tap-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const capsFile = capsPath({ stateDir: dir })
+  const encoder = new TextEncoder()
+  // 场景 1：单个 12MB 块（反例 A 直测新 API）→ 超限放弃，下游字节不变
+  {
+    const huge = new Uint8Array(12 * 1024 * 1024)
+    huge.set(encoder.encode("max_tokens range is [1, 4096]"), 0)
+    const src = new ReadableStream({ start(c) { c.enqueue(huge); c.close() } })
+    let learned = 0
+    const out = tapLearningStream(new Response(src, { status: 400 }), { onLearn: () => { learned++ } })
+    const got = new Uint8Array(await new Response(out).arrayBuffer())
+    if (got.length !== huge.length) throw new Error("12MB 单块透传不完整")
+    if (learned !== 0) throw new Error("超限后仍学习")
+  }
+  // 场景 2：未超限 + 命中官方格式 + 完整消费 → 学习恰一次
+  {
+    const src = new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" } })))
+        c.close()
+      },
+    })
+    let learned = 0
+    const out = tapLearningStream(new Response(src, { status: 400 }), { onLearn: (cap) => { learned++; if (cap !== 4096) throw new Error("cap 错误") } })
+    await new Response(out).arrayBuffer()
+    if (learned !== 1) throw new Error(`完整消费后应学习一次，实际 ${learned}`)
+  }
+  // 场景 3：下游不消费（取消）→ 放弃学习
+  {
+    const src = new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" } })))
+        c.close()
+      },
+    })
+    let learned = 0
+    const out = tapLearningStream(new Response(src, { status: 400 }), { onLearn: () => { learned++ } })
+    const reader = out.getReader()
+    await reader.read()          // 只读一块
+    await reader.cancel()        // 中途取消
+    await new Promise((r) => setTimeout(r, 50))
+    if (learned !== 0) throw new Error("下游取消后仍学习（违反「不消费即放弃」）")
+  }
+  // 场景 4：样本上限——总量 <65536 但匹配串在 8KB 之外 → 不学习
+  {
+    const body = encoder.encode(JSON.stringify({ error: { message: "x".repeat(9000) + "max_tokens range is [1, 4096]" } }))
+    const src = new ReadableStream({ start(c) { c.enqueue(body); c.close() } })
+    let learned = 0
+    const out = tapLearningStream(new Response(src, { status: 400 }), { onLearn: () => { learned++ } })
+    await new Response(out).arrayBuffer()
+    if (learned !== 0) throw new Error("8KB 样本窗外的匹配被学习")
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("12MB 超限放弃 / 完整消费学习恰一次 / 取消不学习 / 8KB 样本窗")
+} catch (e) { fail("tapLearningStream 合约", e) }
 
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")
