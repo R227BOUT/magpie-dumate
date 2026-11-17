@@ -114,5 +114,65 @@ try {
   ok("expireDate=null → 不产生 runsOut（无假数据）")
 } catch (e) { fail("null expireDate", e) }
 
+console.log("[W5] X-Magpie-Effort 头：magpie 宿主的档位注入正文，且不外发该头")
+try {
+  let captured = null
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-eff", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      captured = {
+        headers: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)),
+        body: typeof init?.body === "string" ? init.body : "",
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await hooks.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-magpie-effort": "high" },
+    body: JSON.stringify({ model: "deepseek-v41-flash", messages: [{ role: "user", content: "hi" }] }),
+  })
+  if (r.status !== 200) throw new Error("HTTP " + r.status)
+  if (!captured) throw new Error("上游请求未被捕获")
+  const sent = JSON.parse(captured.body)
+  if (sent.reasoning_effort !== "high") throw new Error(`头部档位未注入正文，reasoning_effort=${sent.reasoning_effort}`)
+  if (sent.enable_thinking !== true) throw new Error("思考开关联未写入")
+  if (captured.headers.get("x-magpie-effort") !== null) throw new Error("x-magpie-effort 头被原样外发（宿主会剥掉，但插件不应转发）")
+  if (!captured.headers.get("authorization")?.startsWith("Bearer ")) throw new Error("gateway token 未附带")
+  ok("头部 high → 正文 reasoning_effort=high + 思考开，头已消费删除")
+} catch (e) { fail("effort 头消费", e) }
+
+console.log("[W6] X-Magpie-Effort 头走 Request 对象形态同样生效（low 归一到 high）")
+try {
+  let captured = null
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-eff", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      captured = { body: typeof init?.body === "string" ? init.body : "" }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await hooks.auth.loader(async () => seat)
+  const req = new Request(GW, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Magpie-Effort": "Low" },
+    body: JSON.stringify({ model: "deepseek-v41-flash", messages: [{ role: "user", content: "hi" }] }),
+  })
+  const r = await loader.fetch(req)
+  if (r.status !== 200) throw new Error("HTTP " + r.status)
+  const sent = JSON.parse(captured.body)
+  if (sent.reasoning_effort !== "high") throw new Error(`Request 头档位未按 low→high 归一（大小写失败?）: ${sent.reasoning_effort}`)
+  ok("Request 对象 + 大小写混写头 → 正文 high（low 归一）")
+} catch (e) { fail("effort 头 Request 形态", e) }
+
 globalThis.fetch = realFetch
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")

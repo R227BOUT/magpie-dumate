@@ -180,10 +180,12 @@ for (const f of files) {
     scanText = text.replace(/"icon"\s*:\s*"data:image\/[^"]*"/g, '"icon":"<inline-image>"')
   }
   const hits = scan(f, scanText, auth)
-  // 扫描器本身在枚举候选路径时会写上那些目录，别报自己
+  // 扫描器自己定义路径模式时必然写上那些目录写法，别把自己的规则当泄漏；
+  // 真实凭据/邮箱/密钥命中依然要报（CR-002：原来的比较标签在 PATTERNS 里不存在）。
   const selfFile = join(ROOT, f) === SELF_PATH
+  const SELF_PATH_LABELS = new Set(["个人目录路径", "绝对路径", "Unix 个人目录"])
   for (const h of hits) {
-    if (selfFile && h.what === "作者机器专属路径") continue
+    if (selfFile && SELF_PATH_LABELS.has(h.what)) continue
     console.log(`  ✗ ${h.file}:${h.line}  ${h.what}  ${h.sample}`)
     total++
   }

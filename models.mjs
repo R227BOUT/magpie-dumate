@@ -22,6 +22,18 @@ const modalities = (list) => Array.isArray(list)
   ? [...new Set(list.filter((x) => ["text", "image", "audio", "video", "pdf"].includes(x)))]
   : ["text"]
 
+// Only models whose reasoning controls are demonstrated on the real gateway
+// advertise levels (2026-11-17 live probes; README「推理档位」has the table).
+// Today that is deepseek-v41-flash alone: glm-53's reasoning_effort actually
+// disables thinking, the auto routers and kimi fluctuate inside noise, and
+// deepseek-v4-pro ran at or below its low level. Everything else stays silent —
+// a model that cannot honour levels must not offer them.
+//
+// The whitelist lives in reasoning.mjs (single source, CR-001); this module
+// only reads it, so a model can never advertise levels the request path would
+// not honour.
+import { REASONING } from "./reasoning.mjs"
+
 function readJson(path) {
   const st = statSync(path)
   if (!st.isFile() || st.size <= 0 || st.size > 2 * 1024 * 1024) throw new Error("Invalid model catalog size")
@@ -55,14 +67,18 @@ export function importModels(config) {
     if (!positive(context) || !positive(output)) continue
     const input = modalities(value.modalities?.input)
     if (!input.includes("text")) continue
+    const variants = REASONING[id]
     models[key] = {
       id,
       // e.g. the old "glm-5" key actually calls "model-text".
       name: key === id ? key : `${key} (API: ${id})`,
       limit: { context, output },
       tool_call: value.tool_call !== false,
-      reasoning: id === "deepseek-v41-flash" || value.reasoning === true || value.capabilities?.reasoning === true,
-      ...(id === "deepseek-v41-flash" ? { variants: { none: {}, low: {}, high: {}, max: {} } } : {}),
+      // The registry's own thinking/capabilities fields are untrusted: the
+      // cloud pushes thinking:{mode:"never"} for every entry, including models
+      // that think by default. The whitelist is the authoritative source.
+      reasoning: !!variants || value.reasoning === true || value.capabilities?.reasoning === true,
+      ...(variants ? { variants } : {}),
       attachment: input.some((x) => x !== "text"),
       modalities: { input, output: ["text"] },
     }

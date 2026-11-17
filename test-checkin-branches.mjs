@@ -1,6 +1,6 @@
 // 第七轮：checkin 五分支全覆盖（fetch mock，不联网不耗积分）
 // 真实分支（已签=done）已在前几轮验证；这里把 mock 能逼出来的分支全走一遍。
-import { DuMatePlugin } from "./index.mjs"
+import { DuMatePlugin, _internal } from "./index.mjs"
 
 const seat = { type: "oauth", cookies: [{ name: "bce-sessionid", value: "x", domain: ".baidu.com" }], source: "manual" }
 const getAuth = async () => seat
@@ -158,5 +158,73 @@ try {
   if (/[\n\r\u001b\u202E]/.test(msg)) throw new Error("消息里仍有控制字符: " + JSON.stringify(msg))
   ok("控制字符已消毒（换行/ESC/bidi 都清掉）")
 } catch (e) { fail("消息消毒", e) }
+
+console.log("[K8] beijingDayTurn 纯函数：固定日期 → 次日北京时间零点（RFC3339 UTC）")
+try {
+  const { beijingDayTurn } = _internal
+  // 2026-11-17T14:00Z = 北京 22:00 → 次日零点 = 2026-11-18 00:00+08:00 = 16:00Z（同一 UTC 日）
+  if (beijingDayTurn(new Date("2026-11-17T14:00:00Z")) !== "2026-11-17T16:00:00.000Z") {
+    throw new Error("22:00 案例: " + beijingDayTurn(new Date("2026-11-17T14:00:00Z")))
+  }
+  // 恰好北京零点（16:00Z）→ 应指向下一个日切
+  if (beijingDayTurn(new Date("2026-11-17T16:00:00Z")) !== "2026-11-18T16:00:00.000Z") {
+    throw new Error("整点案例: " + beijingDayTurn(new Date("2026-11-17T16:00:00Z")))
+  }
+  // 北京 23:59:59 → 当晚之后的那个日切
+  if (beijingDayTurn(new Date("2026-11-17T15:59:59Z")) !== "2026-11-17T16:00:00.000Z") {
+    throw new Error("23:59 案例: " + beijingDayTurn(new Date("2026-11-17T15:59:59Z")))
+  }
+  ok("三个固定日期的日切计算全部正确")
+} catch (e) { fail("beijingDayTurn", e) }
+
+console.log("[K9] done/claimed/inactive 都带 until（宿主据此排程下一次询问）")
+try {
+  const isIso = (v) => typeof v === "string" && Number.isFinite(Date.parse(v)) && v.endsWith("Z")
+  // done 分支
+  const done = await withFetch([["x", () => {}]], async () => {
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("loginBonusInfo")) return json({ code: 0, result: { hasIssued: true, totalPoints: "1000", totalTimes: 9 } })
+      throw new Error("no route")
+    }
+    return hooks.auth.checkin(getAuth)
+  })
+  if (done.outcome !== "done") throw new Error("done outcome=" + done.outcome)
+  if (!isIso(done.until)) throw new Error("done 缺 until: " + done.until)
+  if (done.until !== _internal.beijingDayTurn()) throw new Error("done.until 与 beijingDayTurn() 不一致")
+  // claimed 分支
+  const claimed = await withFetch([["x", () => {}]], async () => {
+    let call = 0
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("loginBonusInfo")) {
+        call++
+        return call === 1
+          ? json({ code: 0, result: { hasIssued: false, totalPoints: "1000", totalTimes: 5 } })
+          : json({ code: 0, result: { hasIssued: true, totalPoints: "1050", totalTimes: 6 } })
+      }
+      if (url.includes("loginBonus")) return json({ code: 0, result: true })
+      throw new Error("no route")
+    }
+    return hooks.auth.checkin(getAuth)
+  })
+  if (claimed.outcome !== "claimed" || !isIso(claimed.until)) {
+    throw new Error("claimed until=" + claimed.until)
+  }
+  // inactive 分支
+  const inactive = await withFetch([["x", () => {}]], async () => {
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("loginBonusInfo")) return json({ code: 0, result: { hasIssued: false, totalPoints: "1000" } })
+      if (url.includes("loginBonus")) return json({ code: 0, result: true })
+      throw new Error("no route")
+    }
+    return hooks.auth.checkin(getAuth)
+  })
+  if (inactive.outcome !== "inactive" || !isIso(inactive.until)) {
+    throw new Error("inactive until=" + inactive.until)
+  }
+  ok("done/claimed/inactive 三分支都带合法 until")
+} catch (e) { fail("until 字段", e) }
 
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")

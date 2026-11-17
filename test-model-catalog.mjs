@@ -183,10 +183,10 @@ try {
     const r = JSON.parse(normalizeReasoningBody(base(lv)))
     if (r.reasoning_effort !== lv || r.enable_thinking !== true) throw new Error(lv + " 被改写")
   }
-  const other = base("none").replace("deepseek-v41-flash", "model-text")
-  if (normalizeReasoningBody(other) !== other) throw new Error("非 V4.1 模型被改写")
+  const other = base("none").replace("deepseek-v41-flash", "kimi-k3")
+  if (normalizeReasoningBody(other) !== other) throw new Error("白名单外模型被改写")
   if (normalizeReasoningBody("not-json") !== "not-json") throw new Error("非 JSON 被改写")
-  ok("四档映射正确，其他模型与非 JSON 请求不受影响")
+  ok("四档映射正确，白名单外模型与非 JSON 请求不受影响")
 } catch (e) { fail("推理档位", e) }
 
 console.log("[C12] 重定向策略：不跟随但保留 3xx，坏凭据仍能判为登录失效")
@@ -199,6 +199,117 @@ try {
   if (checks !== 3) throw new Error(`3xx 判定应覆盖 console×2 + 聊天×1，实际 ${checks}`)
   ok("3 处 manual + 3 处 3xx 判定，安全与错误语义兼顾")
 } catch (e) { fail("重定向策略", e) }
+
+// 0.4.0 推理档位：magpie 宿主把用户选的档位放在 X-Magpie-Effort 请求头里
+// 传给插件的 fetch（正文不写），所以 normalizeReasoningBody 增加第二个参数：头部档位兜底。
+//
+// 白名单只有 deepseek-v41-flash —— 2026-11-17 对本机真实网关逐模型对照实测后，
+// 其他候选全部被证据否决（见 README「推理档位」）：
+//   glm-53：默认 rt=276，带 reasoning_effort 后 rt=0 —— 参数等于"关思考"，声明档位有害
+//   model-text / dm-auto-model/text.L0：plain/low/high 差异在生成长度噪声内，方向不稳定
+//   kimi-k3：首测 low<high，复测 low>high —— 噪声，不是档位
+//   deepseek-v4-pro：两次重复 high≤low —— 无分级证据
+//   qwen4-max：纯请求即 400（上游缺必需头），与本插件无关
+console.log("[C13] 白名单外模型带头部档位时请求一个字节都不改写")
+try {
+  for (const model of ["glm-53", "model-text", "dm-auto-model/text.L0", "kimi-k3"]) {
+    const body = JSON.stringify({ model, messages: [] })
+    for (const lv of ["none", "low", "medium", "high", "xhigh"]) {
+      if (normalizeReasoningBody(body, lv) !== body) {
+        throw new Error(`${model} 被头部档位 ${lv} 改写了（实测不支持分级，必须保持原样）`)
+      }
+    }
+  }
+  ok("glm-53/model-text/text.L0/kimi-k3 全部原样通过")
+} catch (e) { fail("白名单外零改动", e) }
+
+console.log("[C14] 正文档位归一并优先于头部档位")
+try {
+  const body = JSON.stringify({ model: "deepseek-v41-flash", reasoning_effort: "xhigh", messages: [] })
+  const r = JSON.parse(normalizeReasoningBody(body, "low"))
+  if (r.reasoning_effort !== "high") throw new Error(`正文档位应归一为 high，得到 ${r.reasoning_effort}`)
+  ok("正文 xhigh 归一 high（未被头部 low 覆盖）")
+} catch (e) { fail("正文档位优先", e) }
+
+console.log("[C15] deepseek-v41-flash 头部档位走既有开关联映射")
+try {
+  const noEffort = () => JSON.stringify({ model: "deepseek-v41-flash", messages: [] })
+  const low = JSON.parse(normalizeReasoningBody(noEffort(), "low"))
+  if (low.reasoning_effort !== "high" || low.thinking?.type !== "enabled" || low.enable_thinking !== true) {
+    throw new Error("头部 low 未映射到 high+开")
+  }
+  const medium = JSON.parse(normalizeReasoningBody(noEffort(), "medium"))
+  if (medium.reasoning_effort !== "high") throw new Error("头部 medium 应归一为 high")
+  const max = JSON.parse(normalizeReasoningBody(noEffort(), "max"))
+  if (max.reasoning_effort !== "max" || max.enable_thinking !== true) throw new Error("头部 max 未保留")
+  const none = JSON.parse(normalizeReasoningBody(noEffort(), "none"))
+  if ("reasoning_effort" in none || none.thinking?.type !== "disabled" || none.enable_thinking !== false) {
+    throw new Error("头部 none 未彻底关闭思考")
+  }
+  ok("deepseek-v41-flash：low/medium→high、max 保留、none 关闭")
+} catch (e) { fail("头部档位 deepseek", e) }
+
+console.log("[C16] 无档位、非法头部值、非字符串档位一律不触碰请求")
+try {
+  const bare = JSON.stringify({ model: "deepseek-v41-flash", messages: [] })
+  if (normalizeReasoningBody(bare) !== bare) throw new Error("无档位被改写")
+  if (normalizeReasoningBody(bare, "bogus") !== bare) throw new Error("非法头部值被改写")
+  if (normalizeReasoningBody(bare, "  ") !== bare) throw new Error("空白头部值被改写")
+  if (normalizeReasoningBody(bare, 42) !== bare) throw new Error("非字符串头部值被改写")
+  ok("无/非法档位均原样通过")
+} catch (e) { fail("边界不触碰", e) }
+
+console.log("[C17] 推理元数据只给实证模型：仅 deepseek-v41-flash 带档位")
+try {
+  const { models } = importModels(sourceConfig({
+    "deepseek-v41-flash": model("deepseek-v41-flash"),
+    "glm-53": model("glm-53"),
+    "model-text": model("model-text"),
+    "dm-auto-model/text.L0": model("dm-auto-model/text.L0"),
+    "kimi-k3": model("kimi-k3"),
+    "qwen4-max": model("qwen4-max"),
+  }))
+  const ds = models["deepseek-v41-flash"]
+  if (!ds?.reasoning) throw new Error("deepseek 未声明 reasoning")
+  if (Object.keys(ds.variants ?? {}).join(",") !== "none,low,high,max") {
+    throw new Error("deepseek variants 应为 none/low/high/max，得到 " + Object.keys(ds.variants ?? {}).join(","))
+  }
+  for (const id of ["glm-53", "model-text", "dm-auto-model/text.L0", "kimi-k3", "qwen4-max"]) {
+    if (models[id]?.reasoning) throw new Error(`${id} 实测无分级控制，不应声明 reasoning`)
+    if (models[id]?.variants) throw new Error(`${id} 不应声明 variants`)
+  }
+  ok("只有 deepseek 带四档；glm/model-text/L0/kimi/qwen 全部保持沉默")
+} catch (e) { fail("推理白名单元数据", e) }
+
+console.log("[C18] 固定回退表不声明档位（未实测的模型不暴露死档位）")
+try {
+  const plugin = await DuMatePlugin({ directory: dir })
+  const config = { provider: {} }
+  await plugin.config(config)
+  const m = config.provider.dumate.models
+  for (const id of ["model-text", "dm-auto-model/text.L0"]) {
+    if (m[id]?.variants) throw new Error(`回退表 ${id} 不应声明 variants（上游无分级控制）`)
+  }
+  ok("回退表两个入口均无 variants")
+} catch (e) { fail("回退表档位", e) }
+
+console.log("[C19] 白名单单一事实源：models.mjs 必须从 reasoning.mjs 取，不得自带副本")
+try {
+  const modelsSrc = readFileSync(new URL("./models.mjs", import.meta.url), "utf8")
+  const reasoningSrc = readFileSync(new URL("./reasoning.mjs", import.meta.url), "utf8")
+  // CR-001：两处各写一份白名单会静默漂移（UI 出现档位但请求不改写）。
+  // 哨兵只禁「第二份白名单定义」：模型名本身在过滤逻辑/注释里出现是合法的。
+  if (!/from\s+"\.\/reasoning\.mjs"/.test(modelsSrc)) {
+    throw new Error("models.mjs 未从 reasoning.mjs 引入白名单（单一事实源被破坏）")
+  }
+  if (/const\s+(REASONING_MODELS|VARIANTS_\w+)/.test(modelsSrc)) {
+    throw new Error("models.mjs 又定义了一份白名单/variants 常量（CR-001 复发）")
+  }
+  if (!/export const REASONING\b/.test(reasoningSrc)) {
+    throw new Error("reasoning.mjs 未导出 REASONING 白名单表")
+  }
+  ok("models.mjs 只消费 reasoning.mjs 的 REASONING 表，无第二份定义")
+} catch (e) { fail("白名单单一事实源", e) }
 
 rmSync(dir, { recursive: true, force: true })
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")

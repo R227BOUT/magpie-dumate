@@ -21,13 +21,19 @@
 // V4.1 reasoning controls were fixed after RanceLee (公众号 HelloRanceLee)
 // reported the macOS sign-in failure and proposed the solution on 2026-11-13.
 // See README.md -> 致谢.
+// 0.4.0: magpie hands the picked reasoning level to the plugin as the
+// X-Magpie-Effort header; the loader now consumes it into the request body
+// (magpie never rewrites the body), which fixes deepseek-v41-flash's levels
+// never reaching DuMate. Live probes the same day showed no other model honours
+// graded effort, so only that one model advertises levels. See README -> 推理档位.
 
 import { createDecipheriv } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { desktopUserDataDir } from "./paths.mjs"
 import { loadModels } from "./models.mjs"
-import { normalizeReasoningBody } from "./reasoning.mjs"
+import { applyReasoning, pickEffort } from "./reasoning.mjs"
+import { routeModel, applyBudget, loadCaps, saveCap, capsPath, tapLearningStream, LEARN_READ_CAP } from "./budget.mjs"
 
 const PROVIDER_ID = "dumate"
 const PROVIDER_NAME = "百度搭子 DuMate"
@@ -45,6 +51,10 @@ const TOKEN_TTL_MS = 60 * 60 * 1000 // refresh token hourly; server gives ~14h
 // auto-routing alias the desktop app itself uses; the gateway resolves it to
 // live upstreams (observed 2026-10-26: responses always echo "model-text" —
 // the router hides upstream identity; id prefix is "gd-").
+// No reasoning levels here: 2026-11-17 live probes showed both router entries
+// fluctuate inside generation noise when given reasoning_effort, so offering
+// levels would be theatre. deepseek-v41-flash (the verified one) comes from
+// models.mjs / models.default.json.
 const FALLBACK_MODELS = [
   { id: "model-text", name: "DuMate Auto (智能路由)", context: 192_000, output: 128_000, reasoning: true },
   { id: "dm-auto-model/text.L0", name: "DuMate Auto L0", context: 192_000, output: 128_000, reasoning: true },
@@ -230,6 +240,15 @@ const cardText = (value, max = 200) => {
 // A hook cut short answers failed, which the host retries in half an hour.
 const CHECKIN_BUDGET_MS = 25 * 1000
 
+// The next 00:00 Asia/Shanghai as RFC 3339 UTC — when the vendor's check-in
+// day flips. China has no DST, so a fixed +08:00 offset is exact. Returned as
+// `until` so the host schedules its next ask instead of polling.
+function beijingDayTurn(now = new Date()) {
+  const shifted = new Date(now.getTime() + 8 * 60 * 60 * 1000)
+  const nextZero = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate() + 1)
+  return new Date(nextZero - 8 * 60 * 60 * 1000).toISOString()
+}
+
 // ---- Console API (GET works with plain cookie header) ----------------------
 
 // Baidu's console redirects expired sessions to an HTML login page with HTTP
@@ -336,6 +355,15 @@ async function fetchGatewayToken(cookieHeader) {
 // ---- Plugin ----------------------------------------------------------------
 
 export const DuMatePlugin = async (input = {}) => {
+  // Model keys registered through the config hook beyond the plugin's own
+  // catalog layers (magpie merges user-added models last and wins). The loader
+  // routes against a trusted set; without these, a model that worked in 0.4.0
+  // would suddenly be rejected with 400 — a compatibility regression.
+  const customModelKeys = new Set()
+  // Bumped by config() whenever the effective model set changes; the loader's
+  // routing view rebuilds lazily against it (a model deleted from the config
+  // stops being trusted on the next request, not on the next sign-in).
+  let customVersion = 0
   const consoleCookies = async (auth) => {
     if (auth?.type !== "oauth" || !Array.isArray(auth.cookies) || !auth.cookies.length) throw signInError(auth)
     return auth.cookies
@@ -370,6 +398,7 @@ export const DuMatePlugin = async (input = {}) => {
                 limit: { context: m.context, output: m.output },
                 tool_call: true,
                 reasoning: !!m.reasoning,
+                ...(m.variants ? { variants: m.variants } : {}),
                 attachment: false,
                 modalities: { input: ["text"], output: ["text"] },
               },
@@ -382,6 +411,13 @@ export const DuMatePlugin = async (input = {}) => {
           ...(was.models ?? {}),
         },
       }
+      // Sync the loader's trust with the *current* effective config: keys
+      // recorded here are rebuilt from scratch on every call, so a model the
+      // host (or user) removed stops being trusted immediately instead of
+      // lingering in the set (GPT-REVIEW-V050-R2 任务二).
+      customModelKeys.clear()
+      for (const key of Object.keys(was.models ?? {})) customModelKeys.add(String(key))
+      customVersion++
     },
 
     provider: {
@@ -445,6 +481,41 @@ export const DuMatePlugin = async (input = {}) => {
           }
         }
         const cookies = auth.cookies
+        // v0.5.0: identity headers the cloud gateway expects (dumate2api's web
+        // chain sends exactly these; without them some models 400 with
+        // "required headers invalid"). Real accountId when the auth record
+        // carries a sane one, "global" otherwise — never a caller-supplied value.
+        const accountId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(auth.accountId ?? ""))
+          ? String(auth.accountId)
+          : "global"
+        // Trusted model names for routing: Map of normalized lookup key ->
+        // canonical API ID (the catalog's original casing — the outbound ID is
+        // never recased, see routeModel). Includes the host-registered user
+        // models so 0.4.0-era custom models keep working. Unknown names are
+        // rejected explicitly — silently rerouting a picked model would break
+        // model identity.
+        //
+        // Rebuilt lazily whenever config() changed the effective model set:
+        // a deleted model loses trust on the next request, not the next
+        // sign-in (GPT-REVIEW-V050-R2 任务二).
+        let trusted = null
+        let trustedVersion = -1
+        const ensureTrusted = () => {
+          if (trusted && trustedVersion === customVersion) return trusted
+          const next = new Map()
+          for (const id of [
+            ...FALLBACK_MODELS.map((m) => m.id),
+            ...Object.keys(loadModels({ stateDir: input.directory })),
+            ...customModelKeys,
+          ]) {
+            const key = String(id).toLowerCase()
+            if (!next.has(key)) next.set(key, String(id))
+          }
+          trusted = next
+          trustedVersion = customVersion
+          return trusted
+        }
+        const capsFile = capsPath({ stateDir: input.directory })
         return {
           baseURL: GATEWAY_BASE,
           apiKey: "dumate",
@@ -465,9 +536,45 @@ export const DuMatePlugin = async (input = {}) => {
                 { status: 400, headers: { "Content-Type": "application/json" } },
               )
             }
+            // magpie-only headers (X-Magpie-*) must never travel upstream; the
+            // effort header is consumed into the body below, the rest are dropped.
+            const inbound = new Headers(init?.headers ?? req?.headers ?? {})
+            const headerEffort = inbound.get("x-magpie-effort") ?? ""
+            for (const h of [...inbound.keys()]) {
+              if (h.startsWith("x-magpie-")) inbound.delete(h)
+            }
             let bodyText = init?.body
             if (bodyText === undefined && req) bodyText = await req.clone().text()
-            bodyText = normalizeReasoningBody(bodyText)
+            // Unified request transform: parse ONCE, then route → reasoning →
+            // budget, then serialize ONCE. Anything that is not a JSON object
+            // travels byte-for-byte unchanged.
+            let outboundModel = ""
+            let routeNote = null
+            try {
+              const parsed = JSON.parse(bodyText)
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                const routed = routeModel(parsed.model, ensureTrusted())
+                if (!routed) {
+                  return new Response(
+                    JSON.stringify({ error: { message: `未知模型 ${String(parsed.model).slice(0, 80)}：不在当前 DuMate 可信模型清单内，已拒绝调用（不做静默改写）`, type: "invalid_request_error" } }),
+                    { status: 400, headers: { "Content-Type": "application/json" } },
+                  )
+                }
+                const originalModel = String(parsed.model)
+                outboundModel = routed.outbound
+                // Diagnose every real rewrite: replacement, [1M] suffix, and
+                // case-equivalent names resolved to their canonical ID.
+                if (originalModel !== outboundModel) {
+                  routeNote = `${originalModel}=>${outboundModel}`
+                }
+                parsed.model = routed.outbound
+                applyReasoning(parsed, pickEffort(parsed, headerEffort))
+                applyBudget(parsed, { env: process.env, caps: loadCaps(capsFile) })
+                bodyText = JSON.stringify(parsed)
+              }
+            } catch {
+              // bodyText is not JSON (or not readable as one) — passthrough.
+            }
             let cred
             try {
               cred = await fetchGatewayToken(cookieHeaderOf(cookies))
@@ -478,9 +585,11 @@ export const DuMatePlugin = async (input = {}) => {
                 { status: expired ? 401 : 502, headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": expired ? "expired" : "kept" } },
               )
             }
-            const headers = new Headers(init?.headers ?? req?.headers)
+            const headers = inbound
             headers.set("Authorization", `Bearer ${cred.token}`)
             headers.set("Content-Type", "application/json")
+            headers.set("X-Dumate-Client-Type", "web")
+            headers.set("X-Dumate-Account-Id", accountId)
             headers.delete("x-api-key")
             headers.delete("content-length")
             const res = await fetch(req ? req.url : input, {
@@ -499,6 +608,41 @@ export const DuMatePlugin = async (input = {}) => {
                 JSON.stringify({ error: { message: "DuMate gateway token 已失效并清除缓存，请重试或重新登录", type: "authentication_error" } }),
                 { status: 401, headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" } },
               )
+            }
+            // 400 with a max_tokens range error → learn the cap for the
+            // outbound model via a streaming side-channel (GPT-REVIEW-V050-R3):
+            // the body's original bytes pass through a TransformStream untouched
+            // (byte fidelity even for invalid UTF-8 and single multi-MB chunks —
+            // nothing is staged for learning beyond an 8 KiB sample), total
+            // bytes are counted and learning is abandoned past LEARN_READ_CAP,
+            // and the write happens only after the caller fully consumes the
+            // response. No clone(), no pre-read blocking, no decode→re-encode.
+            if (res.status === 400 && outboundModel) {
+              const declared = Number(res.headers.get("content-length") ?? "0")
+              if (!(Number.isFinite(declared) && declared > LEARN_READ_CAP) && res.body) {
+                const headers = new Headers(res.headers)
+                headers.delete("content-length")
+                const body = tapLearningStream(res, {
+                  onLearn: (cap) => {
+                    try { saveCap(capsFile, outboundModel, cap, Date.now()) } catch {
+                      // Read-only store or transient FS failure — degrade silently.
+                    }
+                  },
+                })
+                return new Response(body, { status: 400, statusText: res.statusText, headers })
+              }
+              return res
+            }
+            if (routeNote) {
+              // Tag the response without buffering it: streaming bodies pass
+              // through as a stream, only the header set is amended.
+              try {
+                const echoed = new Headers(res.headers)
+                echoed.set("X-Magpie-Dumate-Route", routeNote)
+                return new Response(res.body, { status: res.status, statusText: res.statusText, headers: echoed })
+              } catch {
+                return res
+              }
             }
             return res
           },
@@ -610,6 +754,7 @@ export const DuMatePlugin = async (input = {}) => {
           if (before?.hasIssued === true) {
             return {
               outcome: "done",
+              until: beijingDayTurn(),
               message: `今日已签到（累计 ${cardText(before.totalTimes) || "?"} 天）`,
             }
           }
@@ -629,13 +774,18 @@ export const DuMatePlugin = async (input = {}) => {
             return {
               outcome: "claimed",
               ...(delta ? { credit: delta } : {}),
+              until: beijingDayTurn(),
               message: `签到成功${delta ? ` +${delta} 积分` : ""}（累计 ${cardText(after.totalTimes) || "?"} 天）`,
             }
           }
           // The POST went through but the ledger shows nothing yet. Saying
           // "claimed" would be a claim we cannot back; `inactive` is the honest
           // outcome, and the host re-asks later in the day.
-          return { outcome: "inactive", message: "签到请求已提交，但今日积分尚未到账（可能延迟，稍后自动重试）" }
+          return {
+            outcome: "inactive",
+            until: beijingDayTurn(),
+            message: "签到请求已提交，但今日积分尚未到账（可能延迟，稍后自动重试）",
+          }
         } catch (e) {
           return {
             outcome: "failed",
@@ -764,4 +914,5 @@ export const _internal = {
   iconFromPluginDir,
   iconFromDesktopApp,
   iconFromBundle,
+  beijingDayTurn,
 }

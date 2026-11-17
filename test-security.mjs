@@ -19,11 +19,23 @@ try {
   ok(`全文 ${logs.length} 条日志语句，无一含凭据变量`)
 } catch (e) { fail("日志泄漏", e) }
 
-console.log("[S2] writeFileSync 调用面（插件不应写任何文件）")
+console.log("[S2] 写文件面：主模块只读；budget.mjs 仅允许 caps.json 上限缓存持久化")
 try {
   const writes = [...src.matchAll(/writeFileSync|appendFileSync|mkdirSync|rmdirSync|unlinkSync/g)].map((m) => m[0])
-  if (writes.length) throw new Error("插件含写文件调用: " + writes.join(","))
-  ok("插件只读不写（只读复用承诺成立）")
+  if (writes.length) throw new Error("主模块含写文件调用: " + writes.join(","))
+  // 0.5.0 持久化白名单：上限缓存（caps.json）是唯一新增的持久化面，全部
+  // 收敛在 budget.mjs；models.mjs 的模型快照为 0.3.0 既有白名单成员。
+  const budgetSrc = readFileSync(join(here, "budget.mjs"), "utf8")
+  // 缓存文件永不接触凭据类数据：整个模块不允许出现凭据形态的字面量。
+  if (/cookie|authorization|bearer|bce-sessionid/i.test(budgetSrc)) {
+    throw new Error("budget.mjs 出现凭据形态字面量（caps.json 必须与凭据隔离）")
+  }
+  // 写入目标唯一：writeFileSync 只写 caps 临时文件；除模型键/数值外不许带别的字段。
+  const writeCalls = [...budgetSrc.matchAll(/writeFileSync\(([^,]+),/g)].map((m) => m[1].trim())
+  if (writeCalls.length !== 1 || writeCalls[0] !== "temp") {
+    throw new Error("budget.mjs 写文件目标超出白名单: " + writeCalls.join(","))
+  }
+  ok("主模块零写入；budget.mjs 仅写 caps.json（无凭据字面量，写入目标唯一）")
 } catch (e) { fail("写文件面", e) }
 
 console.log("[S3] access 字段形态（cookie: 前缀 + 明文 header）——确认 magpie 侧存储是预期的")
