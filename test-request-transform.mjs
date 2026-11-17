@@ -8,7 +8,10 @@
 //     映射必须留诊断；未知模型显式拒绝，绝不静默兜底成 model-text。
 // 全部离线（mock globalThis.fetch）。
 import { DuMatePlugin } from "./index.mjs"
-import { routeModel } from "./budget.mjs"
+import { routeModel, capsPath } from "./budget.mjs"
+import { mkdirSync, rmSync, existsSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 const ok = (n, extra = "") => console.log(`  PASS ${n}${extra ? " · " + extra : ""}`)
 const fail = (n, e) => { console.error(`  FAIL ${n}:`, e?.message ?? e); process.exitCode = 1 }
@@ -155,21 +158,102 @@ try {
   ok("非 JSON 体逐字节透传")
 } catch (e) { fail("非 JSON 透传", e) } finally { restore() }
 
-console.log("[T10] routeModel 纯函数边界：空名/仅后缀/大小写")
+console.log("[T10] routeModel 纯函数边界：匹配键与出站键分离，规范 API ID 保真")
 try {
-  const trusted = new Set(["model-text", "glm-53", "dm-auto-model/text.l0"])
+  // trusted 是 Map：键 = 归一化查找键（小写），值 = 可信清单里的规范 API ID。
+  // 匹配允许大小写归一，出站必须采用清单记录的原始规范 ID（GPT-REVIEW-V050-R1 任务一）。
+  const trusted = new Map([
+    ["model-text", "model-text"],
+    ["glm-53", "glm-53"],
+    ["dm-auto-model/text.l0", "dm-auto-model/text.L0"],
+    ["dm-auto-model/text.l1", "dm-auto-model/text.L1"],
+    ["dm-auto-model/text.l2", "dm-auto-model/text.L2"],
+    ["dm-auto-model/mm.l0", "dm-auto-model/mm.L0"],
+  ])
   if (routeModel("model-text", trusted).outbound !== "model-text") throw new Error("直通失败")
   if (routeModel("model-text", trusted).note !== null) throw new Error("直通不应带诊断")
   if (routeModel("glm-53[1M]", trusted).outbound !== "glm-53") throw new Error("[1M] 剥离失败")
   if (routeModel("glm-53[1M]", trusted).note !== "suffix") throw new Error("[1M] 应带 suffix 诊断")
-  if (routeModel("dm-auto-model/text.L0", trusted).outbound !== "dm-auto-model/text.l0") throw new Error("大小写归一失败")
+  if (routeModel("dm-auto-model/text.L0", trusted).outbound !== "dm-auto-model/text.L0") {
+    throw new Error("规范 ID 被改成小写出站（P0-1 复发）")
+  }
+  if (routeModel("dm-auto-model/text.L1", trusted).outbound !== "dm-auto-model/text.L1") {
+    throw new Error("text.L1 规范 ID 被改写")
+  }
+  if (routeModel("dm-auto-model/mm.L0", trusted).outbound !== "dm-auto-model/mm.L0") {
+    throw new Error("mm.L0 规范 ID 被改写")
+  }
+  if (routeModel("dm-auto-model/TEXT.l0", trusted).outbound !== "dm-auto-model/text.L0") {
+    throw new Error("大小写等价名应按清单规范 ID 出站")
+  }
   if (routeModel("glm-5", trusted).outbound !== "glm-53") throw new Error("glm-5 映射失败")
   if (routeModel("", trusted) !== null) throw new Error("空名应拒绝")
   if (routeModel("[1M]", trusted) !== null) throw new Error("仅后缀应拒绝")
   if (routeModel("no-such", trusted) !== null) throw new Error("未知应拒绝")
-  if (routeModel("MODEL-TEXT", trusted)?.outbound !== "model-text") throw new Error("大小写未归一")
   if (routeModel(null, trusted) !== null) throw new Error("非字符串应拒绝")
-  ok("routeModel 边界全部符合规格")
+  ok("routeModel 匹配归一/出站保真/边界全部符合规格")
 } catch (e) { fail("routeModel 边界", e) }
+
+console.log("[T11] fetch 级规范 ID 保真：tier 模型原样出站，网关收到的是清单原始大写 ID")
+try {
+  const st = captureUpstream()
+  const loader = await hooks.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "dm-auto-model/text.L1", messages: [] }) })
+  if (r.status !== 200) throw new Error("HTTP " + r.status)
+  const sent = JSON.parse(st.captured.body)
+  if (sent.model !== "dm-auto-model/text.L1") {
+    throw new Error(`tier 模型被改写成 ${sent.model}（云端无证据接受小写，P0-1 复发）`)
+  }
+  ok("dm-auto-model/text.L1 原样出站（无大小写改写）")
+} catch (e) { fail("tier 规范 ID 出站", e) } finally { restore() }
+
+console.log("[T12] 用户自定义模型兼容：config hook 注册过的模型不被路由拒绝")
+try {
+  const dir = join(tmpdir(), "dumate-transform-custom-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  const config = { provider: { dumate: { models: { "my-custom-model": { name: "自定义", limit: { context: 4096, output: 512 } } } } } }
+  await plugin.config(config)
+  const st = captureUpstream()
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "my-custom-model", messages: [] }) })
+  if (r.status !== 200) throw new Error(`0.4.0 时代可用的自定义模型被 v0.5.0 拒绝（HTTP ${r.status}）——兼容性回归`)
+  const sent = JSON.parse(st.captured.body)
+  if (sent.model !== "my-custom-model") throw new Error("自定义模型被改写: " + sent.model)
+  rmSync(dir, { recursive: true, force: true })
+  ok("config hook 注册的自定义模型直通（未引入静默兜底）")
+} catch (e) { fail("自定义模型兼容", e) } finally { restore() }
+
+console.log("[T13] 400 学习真正有界：声明超限的响应体不读取、不学习、原样返回")
+try {
+  const dir = join(tmpdir(), "dumate-transform-bounded-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  const state = { read: false }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-50", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      state.read = true
+      return new Response(
+        JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" } }),
+        { status: 400, headers: { "Content-Type": "application/json", "Content-Length": "999999" } },
+      )
+    }
+    return realFetch(input, init)
+  }
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v41-flash", messages: [] }) })
+  if (r.status !== 400) throw new Error("HTTP " + r.status)
+  const body = await r.text()
+  if (!body.includes("4096")) throw new Error("400 响应体未透传")
+  if (existsSync(capsPath({ stateDir: dir }))) {
+    throw new Error("声明 999999 字节的响应体被读取并学习（有界读取承诺被破坏）")
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("Content-Length 超限 → 跳过学习 + 响应体原样透传")
+} catch (e) { fail("有界读取", e) } finally { restore() }
 
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")

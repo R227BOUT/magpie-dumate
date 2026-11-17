@@ -120,6 +120,32 @@ try {
   ok("白名单/常量符合第一阶段范围")
 } catch (e) { fail("FLOOR 白名单", e) }
 
+console.log("[B4b] 模型专属上限命中（大小写一致）：L1/L0/L2 各自命中静态表，不落默认值")
+try {
+  const env = {}
+  // 请求值远超各模型静态上限 → 钳制结果必须等于静态表值（GPT-REVIEW-V050-R1 任务二）
+  const l1 = applyBudget({ model: "dm-auto-model/text.L1", max_tokens: 5000000, messages: [] }, { env })
+  if (l1.max_tokens !== 2000000) throw new Error(`text.L1 未命中 2000000（落到 ${l1.max_tokens} = 大小写失配回退默认值）`)
+  const l0 = applyBudget({ model: "dm-auto-model/text.L0", max_tokens: 500000, messages: [] }, { env })
+  if (l0.max_tokens !== 393216) throw new Error(`text.L0 未命中 393216（得到 ${l0.max_tokens}）`)
+  const l2 = applyBudget({ model: "dm-auto-model/text.L2", max_tokens: 500000, messages: [] }, { env })
+  if (l2.max_tokens !== 131072) throw new Error(`text.L2 未命中 131072（得到 ${l2.max_tokens}）`)
+  const mt = applyBudget({ model: "model-text", max_tokens: 500000, messages: [] }, { env })
+  if (mt.max_tokens !== 393216) throw new Error(`model-text 未命中 393216（得到 ${mt.max_tokens}）`)
+  ok("text.L1→2000000、text.L0→393216、text.L2→131072、model-text→393216 全部命中")
+} catch (e) { fail("专属上限命中", e) }
+
+console.log("[B4c] 学习缓存键与出站 ID 统一：规范大小写写入可被命中（含等价大小写查询）")
+try {
+  const env = {}
+  const caps = { "dm-auto-model/text.L1": { cap: 1500000, at: Date.now() } }
+  const exact = applyBudget({ model: "dm-auto-model/text.L1", max_tokens: 5000000, messages: [] }, { env, caps })
+  if (exact.max_tokens !== 1500000) throw new Error(`学习值未按出站键命中（得到 ${exact.max_tokens}）`)
+  const equivalent = applyBudget({ model: "dm-auto-model/text.l1", max_tokens: 5000000, messages: [] }, { env, caps })
+  if (equivalent.max_tokens !== 1500000) throw new Error(`等价大小写的学习键未命中（得到 ${equivalent.max_tokens}）`)
+  ok("学习缓存按出站模型键命中（大小写不敏感查找，键保留规范形态）")
+} catch (e) { fail("学习键统一", e) }
+
 console.log("[B5] learnCapFromBody 三种官方错误格式；非范围型 400 不学习")
 try {
   if (learnCapFromBody(JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" } })) !== 4096) {

@@ -33,7 +33,7 @@ import { join } from "node:path"
 import { desktopUserDataDir } from "./paths.mjs"
 import { loadModels } from "./models.mjs"
 import { applyReasoning, pickEffort } from "./reasoning.mjs"
-import { routeModel, applyBudget, loadCaps, saveCap, capsPath, learnCapFromBody } from "./budget.mjs"
+import { routeModel, applyBudget, loadCaps, saveCap, capsPath, learnCapFromBody, LEARN_READ_CAP } from "./budget.mjs"
 
 const PROVIDER_ID = "dumate"
 const PROVIDER_NAME = "百度搭子 DuMate"
@@ -355,6 +355,11 @@ async function fetchGatewayToken(cookieHeader) {
 // ---- Plugin ----------------------------------------------------------------
 
 export const DuMatePlugin = async (input = {}) => {
+  // Model keys registered through the config hook beyond the plugin's own
+  // catalog layers (magpie merges user-added models last and wins). The loader
+  // routes against a trusted set; without these, a model that worked in 0.4.0
+  // would suddenly be rejected with 400 — a compatibility regression.
+  const customModelKeys = new Set()
   const consoleCookies = async (auth) => {
     if (auth?.type !== "oauth" || !Array.isArray(auth.cookies) || !auth.cookies.length) throw signInError(auth)
     return auth.cookies
@@ -402,6 +407,9 @@ export const DuMatePlugin = async (input = {}) => {
           ...(was.models ?? {}),
         },
       }
+      // Remember what the host let through so the loader's routing trusts the
+      // same set (see customModelKeys above).
+      for (const key of Object.keys(was.models ?? {})) customModelKeys.add(String(key))
     },
 
     provider: {
@@ -472,13 +480,21 @@ export const DuMatePlugin = async (input = {}) => {
         const accountId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(auth.accountId ?? ""))
           ? String(auth.accountId)
           : "global"
-        // Trusted model names for routing: the live/snapshot/default catalog
-        // plus the hardcoded fallbacks. Unknown names are rejected explicitly —
-        // silently rerouting a picked model would break model identity.
-        const trusted = new Set([
-          ...FALLBACK_MODELS.map((m) => m.id.toLowerCase()),
-          ...Object.keys(loadModels({ stateDir: input.directory })).map((id) => id.toLowerCase()),
-        ])
+        // Trusted model names for routing: Map of normalized lookup key ->
+        // canonical API ID (the catalog's original casing — the outbound ID is
+        // never recased, see routeModel). Includes the host-registered user
+        // models so 0.4.0-era custom models keep working. Unknown names are
+        // rejected explicitly — silently rerouting a picked model would break
+        // model identity.
+        const trusted = new Map()
+        for (const id of [
+          ...FALLBACK_MODELS.map((m) => m.id),
+          ...Object.keys(loadModels({ stateDir: input.directory })),
+          ...customModelKeys,
+        ]) {
+          const key = String(id).toLowerCase()
+          if (!trusted.has(key)) trusted.set(key, String(id))
+        }
         const capsFile = capsPath({ stateDir: input.directory })
         return {
           baseURL: GATEWAY_BASE,
@@ -524,9 +540,12 @@ export const DuMatePlugin = async (input = {}) => {
                     { status: 400, headers: { "Content-Type": "application/json" } },
                   )
                 }
+                const originalModel = String(parsed.model)
                 outboundModel = routed.outbound
-                if (routed.note && String(parsed.model).toLowerCase() !== routed.outbound) {
-                  routeNote = `${parsed.model}=>${routed.outbound}`
+                // Diagnose every real rewrite: replacement, [1M] suffix, and
+                // case-equivalent names resolved to their canonical ID.
+                if (originalModel !== outboundModel) {
+                  routeNote = `${originalModel}=>${outboundModel}`
                 }
                 parsed.model = routed.outbound
                 applyReasoning(parsed, pickEffort(parsed, headerEffort))
@@ -573,7 +592,12 @@ export const DuMatePlugin = async (input = {}) => {
             // 400 with a max_tokens range error → learn the cap for the
             // outbound model and record it (bounded read, atomic write; a
             // failed write must never affect the response the caller gets).
+            // Bounded: a body whose declared size exceeds LEARN_READ_CAP is
+            // never read at all — learning is skipped and the original
+            // response is handed back untouched.
             if (res.status === 400 && outboundModel) {
+              const declared = Number(res.headers.get("content-length") ?? "0")
+              if (Number.isFinite(declared) && declared > LEARN_READ_CAP) return res
               try {
                 const text = await res.text()
                 const cap = learnCapFromBody(text)

@@ -34,6 +34,8 @@ export const DEFAULT_BUDGET = 32768
 export const CAPS_TTL_MS = 7 * 24 * 3600e3
 // 400 错误体的分析窗（有界读取承诺：窗外的匹配不学习）。
 export const LEARN_SLICE = 8192
+// 学习读取的总量上界：上游声明超过此值的响应体不读取、不学习、原样透传。
+export const LEARN_READ_CAP = 65536
 
 // 已验证静态上限（dumate2api src/dumate-caps.js 的实测值）。
 export const OUTPUT_CAPS = {
@@ -60,6 +62,11 @@ const validName = (s) => typeof s === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0
 
 // 返回 { outbound, note }；未知/空名返回 null（调用方显式 400）。
 // note: null=直通；"replacement"=版本替代；"suffix"=仅剥了 [1M] 后缀。
+//
+// trusted 是 Map：键 = 归一化查找键（小写），值 = 可信清单记录的**规范 API ID**。
+// 匹配键与出站键分离（GPT-REVIEW-V050-R1 任务一）：查找允许大小写归一，
+// 但出站一律采用清单记录的原始规范 ID——dm-auto-model/text.L0 不得变成
+// text.l0（云端是否接受小写无证据，不得视为等价）。
 export function routeModel(name, trusted) {
   const raw = typeof name === "string" ? name.trim() : ""
   if (!raw) return null
@@ -67,13 +74,12 @@ export function routeModel(name, trusted) {
   const hadSuffix = /\[1M\]$/i.test(raw)
   const stripped = raw.replace(/\[1M\]$/i, "").trim()
   if (!validName(stripped)) return null
-  const lower = stripped.toLowerCase()
-  const replacement = MODEL_REPLACEMENTS[lower]
+  const key = stripped.toLowerCase()
+  const replacement = MODEL_REPLACEMENTS[key]
   if (replacement) return { outbound: replacement, note: "replacement" }
-  if (trusted instanceof Set && trusted.has(lower)) {
-    return { outbound: lower, note: hadSuffix && lower !== raw ? "suffix" : null }
-  }
-  return null
+  const canonical = trusted instanceof Map ? trusted.get(key) : null
+  if (!canonical) return null
+  return { outbound: canonical, note: hadSuffix ? "suffix" : null }
 }
 
 // ---- max_tokens 预算 --------------------------------------------------------
@@ -88,16 +94,42 @@ export function resolveMaxTokens(requested, { floor = 0, defaultBudget = DEFAULT
   return out
 }
 
+// ---- 上限查找（键与出站 ID 统一规则：精确命中优先，等价大小写次之） ----------
+
+// OUTPUT_CAPS 的键是规范 API ID（含大写 L）；查找必须大小写一致，
+// 否则 dm-auto-model/text.L1 会错落 131072 默认值而漏掉 2000000 专属上限
+// （GPT-REVIEW-V050-R1 任务二）。
+function lookupStaticCap(model) {
+  const direct = OUTPUT_CAPS[model]
+  if (Number.isSafeInteger(direct)) return direct
+  const lower = model.toLowerCase()
+  for (const [key, value] of Object.entries(OUTPUT_CAPS)) {
+    if (key.toLowerCase() === lower && Number.isSafeInteger(value)) return value
+  }
+  return undefined
+}
+
+// 学习缓存按出站模型键存储（规范形态）；查找同样大小写一致。
+function lookupLearnedCap(caps, model) {
+  const hit = caps?.[model]
+  if (Number.isSafeInteger(hit?.cap) && hit.cap > 0) return hit.cap
+  const lower = model.toLowerCase()
+  for (const [key, value] of Object.entries(caps ?? {})) {
+    if (key.toLowerCase() === lower && Number.isSafeInteger(value?.cap) && value.cap > 0) return value.cap
+  }
+  return undefined
+}
+
 // 原地修改 request.max_tokens 并返回 request。
 // floor 只对 FLOOR_ENABLED 启用；其余模型缺省不注入、显式值只做保护性钳制。
 // MAGPIE_DUMATE_BUDGET=off 关闭抬升（缺省不注入、显式值原样）。
 export function applyBudget(request, { env = process.env, caps = {} } = {}) {
   if (!request || typeof request !== "object" || Array.isArray(request)) return request
-  const model = typeof request.model === "string" ? request.model.toLowerCase() : ""
+  const model = typeof request.model === "string" ? request.model : ""
   if (!model) return request
   const liftOff = String(env?.MAGPIE_DUMATE_BUDGET ?? "").trim().toLowerCase() === "off"
-  const cap = caps[model]?.cap ?? OUTPUT_CAPS[model] ?? DEFAULT_CAP
-  if (!liftOff && FLOOR_ENABLED.has(model)) {
+  const cap = lookupLearnedCap(caps, model) ?? lookupStaticCap(model) ?? DEFAULT_CAP
+  if (!liftOff && FLOOR_ENABLED.has(model.toLowerCase())) {
     request.max_tokens = resolveMaxTokens(request.max_tokens, { floor: FLOOR, defaultBudget: DEFAULT_BUDGET, cap })
     return request
   }
