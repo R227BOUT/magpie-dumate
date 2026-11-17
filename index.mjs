@@ -555,7 +555,9 @@ export const DuMatePlugin = async (input = {}) => {
                 display: `${used.toFixed(2)} / ${total.toFixed(2)}`,
                 amount: used,
                 limit: total,
-                unit: "points",
+                // Magpie only books daily credit use for a recognized unit;
+                // a generic quota yields no such row.
+                unit: "credits",
                 ...(soonest
                   ? { runsOutAt: new Date(soonest.ms).toISOString(), runsOut: Math.min(total - used, soonest.points) }
                   : {}),

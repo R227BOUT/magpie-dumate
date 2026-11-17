@@ -49,7 +49,8 @@ OpenCode & Magpie provider plugin for **Baidu DuMate（百度搭子，qianfan �
   凭据链路 = Cookie → `/api/dumate/app/token/get` 换 gateway token → `Authorization: Bearer`。
   token 自动缓存与续期（服务端有效期约 14 小时，插件每小时主动刷新）。
 - **每日签到**：magpie `checkin` hook，自动领取每日登录积分（数额以接口差额实时计算，Settings → Usage → Plugins 开关）。
-- **余额展示**：magpie `usage` hook，在 Usage 页显示剩余/总积分、最近到期积分包。
+- **余额展示**：magpie `usage` hook，在 Usage 页显示剩余/总积分、最近到期积分包；
+  额度窗口按 Magpie 的 credits 形状上报，Usage 卡片还会显示「每天用掉的积分」。
 - **三种登录方式**：
   1. 桌面端登录态复用（读取本机 `qianfan-desktop-app/auth.json` + `.cookie-key`，**只读**）
   2. 浏览器登录（无需安装 DuMate：打开 login.bce.baidu.com 登录后，从 DevTools → Network

@@ -93,6 +93,10 @@ try {
   if (!w.runsOutAt || w.runsOut !== 5000) throw new Error("runsOut 计算: " + JSON.stringify(w.runsOut))
   if (u.plan !== "已签到 5 天") throw new Error("plan: " + u.plan)
   ok(`used=${w.used.toFixed(2)}%, runsOut=5000（expired 包被正确忽略）, plan 正确`)
+  // Magpie 的「每天用掉的积分」不是插件画的：它按 usage window 的
+  // amount/limit + credits 形状自动记账。unit=points 会被当成普通额度，卡片没有这一行。
+  if (w.unit !== "credits") throw new Error("window unit 应为 credits，实际: " + w.unit)
+  ok(`usage window 符合 Magpie 积分形状（${w.display}），可记账每日消耗`)
 } catch (e) { fail("windows 计算", e) }
 
 console.log("[W4] usage 中 expireDate 为字符串数字（真实接口形态）已处理")
