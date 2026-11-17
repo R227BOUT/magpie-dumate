@@ -256,4 +256,84 @@ try {
   ok("Content-Length 超限 → 跳过学习 + 响应体原样透传")
 } catch (e) { fail("有界读取", e) } finally { restore() }
 
+console.log("[T14] 有界读取：无 Content-Length、实际 70KB 的 400 体 → 流式计数超限即放弃学习，响应原样")
+try {
+  const dir = join(tmpdir(), "dumate-transform-bnd2-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  const bigBody = JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" + "x".repeat(70000) } })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-50", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      // 无 Content-Length 头（chunked/未声明场景），实际约 70KB
+      return new Response(bigBody, { status: 400, headers: { "Content-Type": "application/json" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v41-flash", messages: [] }) })
+  if (r.status !== 400) throw new Error("HTTP " + r.status)
+  if (r.headers.get("content-type") !== "application/json") throw new Error("400 响应头丢失")
+  const text = await r.text()
+  if (text !== bigBody) throw new Error(`响应体未原样透传（长度 ${text.length} ≠ ${bigBody.length}）`)
+  if (existsSync(capsPath({ stateDir: dir }))) {
+    throw new Error("无 CL 声明的 70KB 体被完整读入并学习——有界读取未成立（R2-P1 复发）")
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("无 CL + 70KB → 放弃学习 + 原始错误体/状态/头原样")
+} catch (e) { fail("无 CL 有界读取", e) } finally { restore() }
+
+console.log("[T15] 有界读取：Content-Length 虚假偏小（声明 10、实际 70KB）→ 仍按实际字节计数放弃学习")
+try {
+  const dir = join(tmpdir(), "dumate-transform-bnd3-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  const bigBody = JSON.stringify({ error: { message: "max_tokens range is [1, 4096]" + "y".repeat(70000) } })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url ?? ""
+    if (url.includes("/api/dumate/app/token/get")) {
+      return new Response(JSON.stringify({ code: 0, result: { token: "tok-50", expired_at: new Date(Date.now() + 3600e3).toISOString() } }), { status: 200 })
+    }
+    if (url.includes("dumate-svc")) {
+      return new Response(bigBody, { status: 400, headers: { "Content-Type": "application/json", "Content-Length": "10" } })
+    }
+    return realFetch(input, init)
+  }
+  const loader = await plugin.auth.loader(async () => seat)
+  const r = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "deepseek-v41-flash", messages: [] }) })
+  if (r.status !== 400) throw new Error("HTTP " + r.status)
+  const text = await r.text()
+  if (text !== bigBody) throw new Error("响应体未原样透传")
+  if (existsSync(capsPath({ stateDir: dir }))) {
+    throw new Error("虚假偏小 CL 被信任并学习——实际字节计数未生效（R2-P1 复发）")
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("虚假 CL + 70KB → 按实际字节计数放弃学习 + 原样透传")
+} catch (e) { fail("虚假 CL 有界读取", e) } finally { restore() }
+
+console.log("[T16] 自定义模型生命周期：config 删除后不再可信（当前有效配置是唯一可信来源）")
+try {
+  const dir = join(tmpdir(), "dumate-transform-life-" + Math.random().toString(36).slice(2, 8))
+  mkdirSync(dir, { recursive: true })
+  const plugin = await DuMatePlugin({ directory: dir })
+  // 第一步：注册自定义模型 → 可信、可调用
+  const withCustom = { provider: { dumate: { models: { "my-custom-model": { name: "自定义", limit: { context: 4096, output: 512 } } } } } }
+  await plugin.config(withCustom)
+  const st = captureUpstream()
+  const loader = await plugin.auth.loader(async () => seat)
+  const r1 = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "my-custom-model", messages: [] }) })
+  if (r1.status !== 200) throw new Error(`注册后应可调用（HTTP ${r1.status}）`)
+  // 第二步：重新 config 且不再包含该模型 → 必须立即失去信任
+  await plugin.config({ provider: {} })
+  const r2 = await loader.fetch(GW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "my-custom-model", messages: [] }) })
+  if (r2.status !== 400) {
+    throw new Error(`已从配置删除的模型仍被信任（HTTP ${r2.status}）——生命周期未与当前有效配置同步`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+  ok("先注册→再删除→重新 config → 立即 400（不残留信任）")
+} catch (e) { fail("自定义模型生命周期", e) } finally { restore() }
+
 console.log(process.exitCode ? "\n== 有失败项 ==" : "\n== 全部通过 ==")

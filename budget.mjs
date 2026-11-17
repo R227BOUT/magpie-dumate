@@ -34,8 +34,65 @@ export const DEFAULT_BUDGET = 32768
 export const CAPS_TTL_MS = 7 * 24 * 3600e3
 // 400 错误体的分析窗（有界读取承诺：窗外的匹配不学习）。
 export const LEARN_SLICE = 8192
-// 学习读取的总量上界：上游声明超过此值的响应体不读取、不学习、原样透传。
+// 学习读取的总量上界：无论声明与否，实际读取超过此值即放弃学习。
 export const LEARN_READ_CAP = 65536
+
+// 有界探测（GPT-REVIEW-V050-R2 任务一）：从响应体流**按实际字节计数**读取，
+// 至多 cap 字节。Content-Length 缺失、虚假偏小、分块传输都不影响本保证——
+// 计数永远基于实际收到的字节。
+//
+// 返回 { text, overflow, body }：
+//   - 未超限（body 已完整读入，≤cap）：text = 完整正文，body = null。
+//   - 超限：overflow = true，text = ""（不用于学习），body = 重组的可读流——
+//     已缓冲的头部分块 + 惰性续读的余量，调用方拿到的字节与原始响应完全一致
+//     且无需整段入内存。
+// 注意：不用 res.clone()——undici 的 tee 在取消一支分支时会卡住另一支的
+// 背压（实测 T14 挂起），直接消费原流再重组是可靠且同样有界的方案。
+export async function readBoundedHead(res, cap = LEARN_READ_CAP) {
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  const head = []
+  let bytes = 0
+  let overflow = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value?.byteLength ?? 0
+    head.push(value)
+    if (bytes > cap) {
+      overflow = true
+      break
+    }
+  }
+  let text = null
+  if (!overflow) {
+    text = ""
+    for (const chunk of head) text += decoder.decode(chunk, { stream: true })
+    text += decoder.decode()
+  }
+  // 重组响应体流：头部分块先入队，余量从同一 reader 惰性续读。
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of head) controller.enqueue(chunk)
+      if (!overflow) controller.close()
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) controller.close()
+        else controller.enqueue(value)
+      } catch (e) {
+        controller.error(e)
+      }
+    },
+    cancel() {
+      try { reader.cancel() } catch {
+        // 流已结束或本就不可读——无碍。
+      }
+    },
+  })
+  return { text, overflow, body }
+}
 
 // 已验证静态上限（dumate2api src/dumate-caps.js 的实测值）。
 export const OUTPUT_CAPS = {
